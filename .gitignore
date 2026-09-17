@@ -14,3 +14,8 @@ scripts/baseline_frozen.json
 scripts/prediction_eval_history.jsonl
 scripts/eval_comparison.log
 scripts/eval_cron.out
+
+# make deps 的产物（CTranslate2 静态库与头文件）。独立仓库不提交它们，
+# 每个 checkout 跑一次 make deps 生成；librime 的内嵌副本当年误跟踪了。
+lib/
+include/
