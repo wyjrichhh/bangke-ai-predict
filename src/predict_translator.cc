@@ -74,6 +74,26 @@ void PublishAITextProperty(Engine* engine, const string& text) {
   }
 }
 
+constexpr const char* kPendingProperty = "ai_predict/pending";
+
+/// Tell the frontend whether an inference is still outstanding.
+///
+/// Only ever called from the client thread -- PredictTranslator::Query runs
+/// inside Compose -- never from the worker: the property map belongs to the
+/// Context and the worker must not touch it. The frontend re-composes on its
+/// own thread while this is raised, which is how a finished prediction reaches
+/// the menu.
+void PublishPendingProperty(Engine* engine, bool pending) {
+  if (!engine || !engine->context()) {
+    return;
+  }
+  Context* ctx = engine->context();
+  const string value = pending ? "1" : "";
+  if (ctx->get_property(kPendingProperty) != value) {
+    ctx->set_property(kPendingProperty, value);
+  }
+}
+
 }  // namespace
 
 PredictTranslator::PredictTranslator(const Ticket& ticket) : Translator(ticket) {
@@ -202,6 +222,9 @@ an<Translation> PredictTranslator::Query(const string& input,
     // 命中（正确的复用）；在此清缓存会在前导非拼音段（大写 raw/标点/符号）先于拼音段
     // 被翻译时，反复冲掉拼音段刚算好的结果，造成刷新死循环。
     PublishAITextProperty(engine_, "");
+    // No context, so nothing was scheduled -- drop the flag rather than leave
+    // the frontend refreshing for a prediction that will never arrive.
+    PublishPendingProperty(engine_, false);
     return nullptr;
   }
   LOG(INFO) << "ai_predict_translator: built context"
@@ -223,6 +246,8 @@ an<Translation> PredictTranslator::Query(const string& input,
           CountHan(display) >= min_hanzi_) {
         LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
         PublishAITextProperty(engine_, display);
+        // Nothing more is coming for this key; the frontend can stop refreshing.
+        PublishPendingProperty(engine_, false);
         auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
                                          display, "AI");
         cand->set_quality(ai_quality_);
@@ -231,6 +256,9 @@ an<Translation> PredictTranslator::Query(const string& input,
       LOG(INFO) << "ai_predict_translator: cache HIT suppressed (unusable display)"
                 << " raw='" << *raw << "'";
       PublishAITextProperty(engine_, "");
+      // Deterministic outcome: re-scheduling would recompute the same unusable
+      // output, so stop asking the frontend to refresh.
+      PublishPendingProperty(engine_, false);
       return nullptr;
     }
   }
@@ -252,6 +280,10 @@ an<Translation> PredictTranslator::Query(const string& input,
     return nullptr;
   }
   prediction_->Schedule(*built);
+  // Raise the flag the frontend watches: it will keep re-composing on its own
+  // thread until a hit clears it, which is how the prediction reaches the menu
+  // without the worker ever touching the Context.
+  PublishPendingProperty(engine_, true);
   return nullptr;
 }
 

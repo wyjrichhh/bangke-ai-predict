@@ -11,8 +11,6 @@
 #include <rime/context.h>
 #include <rime/engine.h>
 
-#include "frontend_protocol.h"
-
 namespace rime {
 namespace predict {
 
@@ -46,6 +44,12 @@ PredictionEngine::~PredictionEngine() {
 
 void PredictionEngine::Schedule(const PredictionContext& ctx) {
   std::lock_guard<std::mutex> lock(worker_mutex_);
+  // Already in flight for this key -- nothing to do. The frontend re-composes
+  // while collecting a result, which re-runs Query; without this guard each of
+  // those refreshes would restart inference for a key already on its way.
+  if (!pending_cache_key_.empty() && ctx.cache_key == pending_cache_key_) {
+    return;
+  }
   pending_ct2_input_ = ctx.ct2_input;
   pending_cache_key_ = ctx.cache_key;
   pending_prompt_ = ctx.effective_prompt;
@@ -127,53 +131,24 @@ void PredictionEngine::WorkerLoop() {
       last_raw_result_ = result;
     }
 
-    if (engine_ && engine_->context()) {
-      Context* ctx = engine_->context();
-      string current = StripSpaces(ctx->input());
-      // 只有「当前输入的拼音部分」和推理时的 prompt 一致才刷新。拼音部分是 current
-      // 去掉前导 raw/uppercase 前缀(如 "IBM")后的后缀, 故用「key 是 current 后缀」判定。
-      // key 是 current 前缀(继续输入)或两者无关(退格/改字)时跳过: 否则刷新后必然
-      // cache MISS 并重新调度, 形成「推理→刷新→MISS→推理」追赶循环, 让候选来回闪烁。
-      string key = StripSpaces(prompt_snap);
-      bool current_matches =
-          key.empty() || current == key ||
-          (current.size() > key.size() &&
-           current.compare(current.size() - key.size(), key.size(), key) == 0);
-      if (!current_matches) {
-        LOG(INFO) << "PredictionEngine: skip refresh, composition changed"
-                  << " (prompt='" << prompt_snap << "' current_input='"
-                  << ctx->input() << "')";
-        continue;
-      }
-      // Don't disturb the user mid-navigation. RefreshNonConfirmedComposition
-      // re-runs Compose() and resets selected_index to 0, which would yank
-      // the menu back to page 1 / candidate 1 if the user has already paged
-      // (=) or moved the highlight. In that case we keep the cache populated
-      // (so the next keystroke's PredictTranslator::Query will hit it) but
-      // skip the active refresh.
-      if (!ctx->composition().empty() &&
-          ctx->composition().back().selected_index > 0) {
-        LOG(INFO) << "PredictionEngine: skip refresh, user already navigated"
-                  << " (selected_index="
-                  << ctx->composition().back().selected_index << ")";
-        continue;
-      }
-      // A plain update_notifier won't do: ConcreteEngine::Compose skips
-      // segments with status >= kGuess, so it would reuse the old menu and
-      // never re-invoke PredictTranslator::Query. RefreshNonConfirmedComposition
-      // pops the non-selected tail, forcing a re-translate that hits our cache.
-      LOG(INFO) << "PredictionEngine: refreshing composition to surface "
-                << "AI candidate for cache_key='" << cache_key << "'";
-      ctx->RefreshNonConfirmedComposition();
-      // Refresh ran Compose() synchronously, so the new menu is fully built
-      // now -- only now is it safe to tell the frontend to re-read it. We
-      // signal off kRefreshUI rather than "ai_predict/text" because the latter
-      // is set during Compose, so a frontend racing on it would see a torn menu
-      // mid-build. See frontend_protocol.h for the protocol itself.
-      ctx->set_property(
-          protocol::kRefreshUI,
-          protocol::MakeRefreshUIPayload(protocol::kPluginCodename));
-    }
+    // Nothing else happens on this thread, on purpose.
+    //
+    // It used to call ctx->RefreshNonConfirmedComposition() here to surface the
+    // candidate right away. That runs a full Compose() -- every translator and
+    // filter, the Lua ones included -- on this thread, while the client thread
+    // may be inside Compose() on the *same* Context because the user pressed a
+    // key. librime's Context/Engine/translators are not thread-safe, so the two
+    // raced: the crash report shows both threads inside LuaTranslator::Query
+    // under concurrent Compose, one of them taking a bad access in luajit, and
+    // the CPU profile shows this thread pinning a core in the same stack.
+    //
+    // So the worker now only fills the cache. Surfacing the result belongs to
+    // the client thread: PredictTranslator::Query raises ai_predict/pending on
+    // a cache miss and clears it on a hit, and the frontend forces a refresh
+    // from its own thread while that flag is up.
+    LOG(INFO) << "PredictionEngine: cached result for cache_key='" << cache_key
+              << "'; frontend surfaces it";
+    (void)prompt_snap;
   }
 }
 
