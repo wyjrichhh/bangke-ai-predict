@@ -6,7 +6,7 @@ librime 的 CTranslate2 推理插件,为拼音输入实时补 AI 候选。模型
 
 - **`predict_translator.cc`** — 驱动异步 CT2 推理。命中缓存时直接产出 AI 候选(`SimpleCandidate`, type=`ai_predict`),否则 `Schedule()` 一次推理。同时通过 Context property `ai_predict/text` 发布当前预测,供 filter 读取。在 `engine/translators` 中**必须列在首位**,否则 `MergedTranslation::Elect` 不会先问它。
 - **`prediction_engine.cc`** — 后台 worker 线程。防抖(`debounce_ms`)合并快速连击,跑完推理后用 `RefreshNonConfirmedComposition()` 刷新候选菜单,触发缓存命中路径把 AI 候选浮现出来。会跳过两种情况:组合已变、用户已翻页/移动高亮(`selected_index > 0`)。
-- **`context_builder.cc`** — 从 `commit_history` 回溯重建中文上下文窗口(`window_text`),拒绝非拼音 prompt(标点、ASCII 符号、大写缩写),剥离模型可能吐出的标点。cache_key = `window_text|prompt`。触发策略:有上下文(`window_text` 含至少一个汉字)时任意非空 prompt 都推理;无上下文(冷启动)要求 prompt ≥ `min_input_length`。**标点 `punct` 会进入 `window_text`**——CT2 模型带标点反而预测更准,标点充当句子结构信号;候选回显标点的问题由展示层 `StripAllPunctuation`(`ExtractDisplayText`)独立兜底剥离。仅 `thru` / `raw`(ASCII 杂质)被跳过。`has_context` 用"含汉字"而非"非空"判定,避免纯标点窗口(如 `。`)绕过冷启动阈值。
+- **`context_builder.cc`** — 从 `commit_history` 回溯重建中文上下文窗口(`window_text`),拒绝非拼音 prompt(标点、ASCII 符号、大写缩写),剥离模型可能吐出的标点。cache_key = `window_text|prompt`。触发策略:有上下文(`window_text` 含至少一个汉字)时任意非空 prompt 都推理;无上下文(冷启动)要求 prompt ≥ `min_input_length`。**`commit_history` 里所有记录都进 `window_text`**——每条记录都是「已上屏的文本」,包括 librime 为「没进 composition 的按键」记的 `thru`(数字、标点、ascii 模式下的英文)和 `raw`(未翻译就提交的输入,如 `T3` 走 echo 候选)。它们与汉字 commit 在同一条有序链上,拼起来就是原句;跳过它们会把「我下午3点去T3航站楼」退化成「我下午点去航站楼」。模型吃中英/数字/标点混合上下文不会复读(实测),即使有残留也由展示层兜底:`StripAllPunctuation`(`ExtractDisplayText`)剥标点、`IsDisplayableCandidate` 要求含汉字,ASCII 到不了候选。`has_context` 用"含汉字"而非"非空"判定,避免纯标点窗口(如 `。`)绕过冷启动阈值。
 - **`predict_filter.cc`** — 候选流重写。把 AI 文本放到 `target_index`(默认 #1,即第 2 位),三种处置:
   - `inserted` — AI 文本是新的,菜单本没有 → 插入新候选(**增益**)
   - `promoted` — AI 文本在靠后位置 → 用 ShadowCandidate 提到目标位(**增益**)

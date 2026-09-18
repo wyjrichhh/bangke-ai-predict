@@ -22,7 +22,8 @@ struct PredictionContext {
   /// Pure pinyin being composed (spaces stripped). Doubles as the key for the
   /// engine's "does the composition still match the request we sent" check.
   string effective_prompt;
-  /// Chinese context reconstructed from recent commit history. Empty when none.
+  /// Recent commit history: everything that reached the screen, Hanzi plus the
+  /// digits/Latin/punctuation typed around it. Empty when there is no history.
   string window_text;
   /// Result cache key. Combines window_text + effective_prompt so the same
   /// pinyin under different contexts can't collide.

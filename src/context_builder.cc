@@ -78,19 +78,20 @@ string StripAllPunctuation(const string& text) {
 }
 
 /// Walk commit history (most recent first, capped at `max_records`) and
-/// reconstruct the Chinese context window.
+/// reconstruct the context window.
 ///
-/// Skip policy:
-///   - "thru" / "raw" records are dropped: they are literal ASCII keystrokes,
-///     not Chinese context, and feeding ASCII to the model makes it replay the
-///     ASCII as a candidate prefix (window="quickstart" → output "QUICKSTART…").
-///   - "punct" records are KEPT: the model is trained on punctuated text and
-///     predicts more accurately with sentence structure, so committed
-///     punctuation is signal, not noise. It can never reach a candidate because
-///     the display layer strips it (see ExtractDisplayText).
-///   - Everything else, including our own committed "ai_predict" candidates, is
-///     ordinary user-confirmed content -- committing one took a keypress, so it
-///     carries the same coherence signal as any other Hanzi commit.
+/// Every record is text that reached the screen, so every record belongs in the
+/// window -- including the two types librime files for keys that never entered a
+/// composition: "thru" (a key no processor claimed: digits, punctuation,
+/// ascii-mode letters) and "raw" (input committed untranslated, e.g. the echo
+/// candidate for "T3"). They sit in the same ordered list as Hanzi commits, so
+/// concatenating records rebuilds the sentence in order. Dropping them turned
+/// "我下午3点去T3航站楼" into "我下午点去航站楼".
+///
+/// The model takes mixed Hanzi/Latin/digit/punctuation context without replaying
+/// it (measured against the shipped model), and any residue it does emit is
+/// caught downstream anyway: ExtractDisplayText strips punctuation and
+/// IsDisplayableCandidate requires Hanzi, so ASCII cannot reach a candidate.
 void BuildWindowContext(Context* ctx,
                         int max_records,
                         string* window_text_out) {
@@ -103,8 +104,6 @@ void BuildWindowContext(Context* ctx,
   for (auto it = history.rbegin();
        it != history.rend() && collected < static_cast<size_t>(max_records);
        ++it) {
-    if (it->type == "thru" || it->type == "raw")
-      continue;
     if (it->text.empty())
       continue;
     recent_commits.push_back(it->text);
@@ -180,7 +179,9 @@ std::optional<PredictionContext> ContextBuilder::Build(
   ctx.effective_prompt = prompt;
   ctx.window_text = window_text;
   ctx.windowed = has_context;
-  // Pipe is a safe separator: window_text is Hanzi, prompt is [a-z'] only.
+  // Pipe is a safe separator: the prompt is [a-zA-Z'] only, so it never carries
+  // one and the split point stays unambiguous no matter how much ASCII the
+  // window picks up from thru/raw records.
   ctx.cache_key = window_text + "|" + prompt;
   ctx.ct2_input = window_text + "<pinyin_start>" + prompt + "</pinyin_start>";
   return ctx;
