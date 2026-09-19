@@ -36,12 +36,14 @@ class PredictTranslator : public Translator {
   /// Kill switch: false makes the translator inert without touching the
   /// schema's translators/filters lists (see ai_predict/enabled).
   bool enabled_ = true;
-  /// Candidate quality for merged ordering; default -1 yields first slot to script candidates.
-  double ai_quality_ = -1.0;
   /// Min Hanzi count for a prediction to be surfaced. Single-Hanzi homophones
   /// are the schema dictionary's strength and the model's weakness (no frequency
   /// signal), so we let the dictionary take those and only surface 2+ Hanzi.
   int min_hanzi_ = 2;
+  /// Strip the punctuation the model emitted before the candidate menu sees it.
+  /// Off keeps the model's own sentence punctuation ("，我们"), at the cost of
+  /// letting its residue through again (see ExtractDisplayText).
+  bool filter_punctuation_ = true;
 
   std::unique_ptr<PredictionEngine> prediction_;
   bool init_attempted_ = false;

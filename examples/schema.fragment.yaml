@@ -61,18 +61,38 @@
 #     # is a safe floor; raise it to be more conservative about mid-typing
 #     # predictions.
 #     min_context_prompt_length: 2
+#     # Record cap for the commit_history fallback path.
 #     context_window_size: 10
+#     # Codepoint cap for the text the frontend read out of the host app. The
+#     # frontend always reads generously and this is where it gets trimmed, so
+#     # this is the one knob for how much context reaches the model. Wider than
+#     # a typical commit_history window costs inference time.
+#     context_window_chars: 24
+#     # false = always reconstruct from commit_history, i.e. the behaviour from
+#     # before the frontend started pushing real text.
+#     use_frontend_context: true
 #     debounce_ms: 200
 #     max_tokens: 64
 #     device: cpu
 #     # Filter knobs (optional):
 #     target_index: 1             # 0-based slot for the AI candidate (default 1 → 2nd)
 #     search_range: 10            # how many upstream candidates to scan for dedup
-#     # Translator knob (optional, mostly for debugging):
-#     quality: -1
 #     # Minimum Hanzi in a surfaced prediction. Single-Hanzi homophones
 #     # (是/时/事, 在/再, 的/得…) are the schema dictionary's strength and the
 #     # model's weakness -- the model has no frequency signal and loses those
 #     # races ~30% of the time. Let the dictionary take single chars; only
 #     # surface 2+ Hanzi words.
 #     min_hanzi: 2
+#     # Strip the punctuation the model emits before it reaches the candidate
+#     # menu. true (default) drops it, which also suppresses the model's
+#     # context-replay residue (a stray fullwidth ） once leaked into 编译）).
+#     # false keeps the model's own sentence punctuation, so it can offer
+#     # 「，我们」 where the comma is part of the prediction. Candidates still
+#     # have to contain Hanzi, so punctuation alone never becomes a candidate.
+#     filter_punctuation: true
+#     # Candidates come from the model alone: every word candidate is dropped,
+#     # the AI row loses its comment, and the menu shows nothing until a
+#     # prediction is in hand. Requires the schema's word translators to stay in
+#     # place -- they supply the span the AI row is anchored to, and without
+#     # them there is nothing to attach a candidate to.
+#     ai_only: false

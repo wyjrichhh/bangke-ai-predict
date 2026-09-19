@@ -33,6 +33,10 @@ class PredictFilter : public Filter, TagMatching {
   size_t search_range_ = 10;
   /// Kill switch: false makes the filter a no-op (see ai_predict/enabled).
   bool enabled_ = true;
+  /// AI-only mode: the menu carries the AI row and nothing else (see
+  /// ai_predict/ai_only). Word candidates would otherwise sit in front of it
+  /// and the mode exists precisely to hand the choice to the model.
+  bool ai_only_ = false;
 };
 
 }  // namespace predict

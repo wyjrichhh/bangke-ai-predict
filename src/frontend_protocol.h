@@ -45,6 +45,18 @@ inline constexpr const char* kRefreshUI = "_refresh_ui";
 // the active color scheme's accent_text_color.
 inline constexpr const char* kCommentHighlight = "_comment_highlight";
 
+// Input: the text the frontend read from the host app just before the cursor,
+// pushed on every keystroke. The engine cannot see this on its own -- edits
+// that never entered a composition (backspace on committed text, Cmd+A,
+// pasting) are invisible to commit_history, and an unhandled BackSpace clears
+// it outright. Empty means "no ground truth this time"; consumers must fall
+// back rather than treat it as an empty document.
+//
+// Value: raw UTF-8, NOT URL-encoded -- this one flows frontend -> plugin and is
+// read with Context::get_property, so it never meets the query-string parser
+// that the outbound builders below have to satisfy.
+inline constexpr const char* kClientContext = "ai_predict/client_context";
+
 // The frontend table also reserves "_comment_warning" (render comment
 // with warning_text_color). This plugin never flags a prediction as a
 // warning, so the key is intentionally not declared here -- add a

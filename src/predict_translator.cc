@@ -125,6 +125,9 @@ void PredictTranslator::LoadOptions() {
   if (config->GetInt("ai_predict/context_window_size", &n) && n > 0) {
     ctx_opt_.context_window_size = n;
   }
+  if (config->GetInt("ai_predict/context_window_chars", &n) && n > 0) {
+    ctx_opt_.context_window_chars = n;
+  }
   if (config->GetInt("ai_predict/debounce_ms", &n) && n > 0) {
     engine_opt_.debounce_ms = n;
   }
@@ -135,27 +138,38 @@ void PredictTranslator::LoadOptions() {
   if (config->GetString("ai_predict/device", &dev)) {
     device_ = dev;
   }
-  double q = -1.0;
-  if (config->GetDouble("ai_predict/quality", &q)) {
-    ai_quality_ = q;
-  }
   if (config->GetInt("ai_predict/min_hanzi", &n) && n > 0) {
     min_hanzi_ = n;
+  }
+  bool filter_punctuation = true;
+  if (config->GetBool("ai_predict/filter_punctuation", &filter_punctuation)) {
+    filter_punctuation_ = filter_punctuation;
   }
   bool enabled = true;
   if (config->GetBool("ai_predict/enabled", &enabled)) {
     enabled_ = enabled;
+  }
+  bool use_frontend = true;
+  if (config->GetBool("ai_predict/use_frontend_context", &use_frontend)) {
+    ctx_opt_.use_frontend_context = use_frontend;
+  }
+  bool ai_only = false;
+  if (config->GetBool("ai_predict/ai_only", &ai_only)) {
+    ctx_opt_.ai_only = ai_only;
   }
   LOG(INFO) << "ai_predict_translator: options loaded"
             << " model_path=" << model_path_raw_
             << " min_input_length=" << ctx_opt_.min_effective_length
             << " min_context_prompt_length=" << ctx_opt_.min_context_prompt_length
             << " context_window_size=" << ctx_opt_.context_window_size
+            << " context_window_chars=" << ctx_opt_.context_window_chars
+            << " use_frontend_context=" << ctx_opt_.use_frontend_context
             << " debounce_ms=" << engine_opt_.debounce_ms
             << " max_tokens=" << engine_opt_.max_tokens
             << " device=" << device_
-            << " quality=" << ai_quality_
             << " min_hanzi=" << min_hanzi_
+            << " filter_punctuation=" << filter_punctuation_
+            << " ai_only=" << ctx_opt_.ai_only
             << " enabled=" << enabled_;
 }
 
@@ -229,20 +243,30 @@ an<Translation> PredictTranslator::Query(const string& input,
   }
   LOG(INFO) << "ai_predict_translator: built context"
             << " mode=" << (built->windowed ? "windowed" : "direct")
+            << " window_source="
+            << (built->window_from_frontend ? "frontend" : "history")
             << " window_text='" << built->window_text << "'"
+            // Only present when the window came from the frontend: what the
+            // history path would have said instead. Lets the two be compared
+            // offline -- if they disagree often, the frontend read is suspect.
+            << (built->window_from_frontend
+                    ? " history_window='" + built->history_window_text + "'"
+                    : "")
             << " effective_prompt='" << built->effective_prompt << "'"
             << " cache_key='" << built->cache_key << "'";
 
   if (auto raw = prediction_->GetCachedResult(built->cache_key)) {
     if (!raw->empty()) {
-      const string display = ExtractDisplayText(*raw);
+      const string display = ExtractDisplayText(*raw, filter_punctuation_);
       // A cached result is deterministic: if its display text is unusable
       // (empty after punctuation strip, carrying Latin residue, or a single
       // Hanzi the dictionary ranks better), re-scheduling would recompute the
       // SAME unusable output and refresh again -- a busy loop. So on a HIT we
       // either surface the candidate or give up for this key; we never fall
       // through to Schedule().
-      if (!display.empty() && IsDisplayableCandidate(display, built->effective_prompt) &&
+      if (!display.empty() &&
+          IsDisplayableCandidate(display, built->effective_prompt,
+                                 ctx_opt_.ai_only) &&
           CountHan(display) >= min_hanzi_) {
         LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
         PublishAITextProperty(engine_, display);
@@ -250,7 +274,6 @@ an<Translation> PredictTranslator::Query(const string& input,
         PublishPendingProperty(engine_, false);
         auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
                                          display, "AI");
-        cand->set_quality(ai_quality_);
         return New<AIPredictTranslation>(cand);
       }
       LOG(INFO) << "ai_predict_translator: cache HIT suppressed (unusable display)"

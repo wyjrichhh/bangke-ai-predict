@@ -3,6 +3,8 @@
 
 #include "context_builder.h"
 
+#include "frontend_protocol.h"
+
 #include <algorithm>
 #include <vector>
 #include <utf8.h>
@@ -29,13 +31,25 @@ string StripSpaces(const string& s) {
 // acronyms ("SSO"). None are pinyin; the CT2 model can only echo them back as
 // garbage (window="...日志" + prompt="," -> candidate ","), so we reject them
 // before they reach the trigger policy.
-bool IsPinyinPrompt(const string& s) {
+//
+// `ai_only` widens what counts as input. That mode appends digits and a set of
+// punctuation marks to the composition (and to the schema's speller alphabet so
+// they stay inside the pinyin segment), handing us prompts like "zenmeyang1" or
+// "woxiangqu,beijing"; rejecting those would silently stop the mode predicting
+// at all. Ordinary mode keeps the narrow rule, so nothing there changes.
+bool IsPinyinPrompt(const string& s, bool ai_only) {
   bool has_letter = false;
   for (char c : s) {
     if (c >= 'a' && c <= 'z') {
       has_letter = true;
     } else if (c >= 'A' && c <= 'Z') {
       // 英文缩写（如 APPLE/IBM）：不因此拒绝，prompt 保留大写交给模型处理。
+    } else if (ai_only && (c >= '0' && c <= '9')) {
+      // 数字：集合与前端 BangkeSettings.aiOnlyExtraInput 保持一致。
+    } else if (ai_only &&
+               (c == ',' || c == '.' || c == ';' || c == ':' || c == '!' ||
+                c == '?')) {
+      // 同上，标点也是该模式追加进 composition 的。
     } else if (c != '\'') {
       return false;
     }
@@ -65,6 +79,23 @@ bool IsPunctCodepoint(uint32_t cp) {
   return false;
 }
 
+/// Keep the last `max_codepoints` codepoints of `text`.
+///
+/// The frontend reads a deliberately generous window and this is where it gets
+/// trimmed, so how much context reaches the model is one schema knob on this
+/// side rather than a constant each frontend has to agree on. Trimming by
+/// codepoint (not byte) so a multi-byte character is never cut in half.
+string TailCodepoints(const string& text, int max_codepoints) {
+  if (max_codepoints <= 0) {
+    return string();
+  }
+  auto it = text.end();
+  for (int i = 0; i < max_codepoints && it != text.begin(); ++i) {
+    utf8::prior(it, text.begin());
+  }
+  return string(it, text.end());
+}
+
 string StripAllPunctuation(const string& text) {
   string result;
   auto it = text.begin();
@@ -90,8 +121,10 @@ string StripAllPunctuation(const string& text) {
 ///
 /// The model takes mixed Hanzi/Latin/digit/punctuation context without replaying
 /// it (measured against the shipped model), and any residue it does emit is
-/// caught downstream anyway: ExtractDisplayText strips punctuation and
-/// IsDisplayableCandidate requires Hanzi, so ASCII cannot reach a candidate.
+/// caught downstream anyway: IsDisplayableCandidate requires Hanzi and rejects
+/// Latin, so ASCII cannot reach a candidate. Punctuation is the exception --
+/// ExtractDisplayText keeps it when ai_predict/filter_punctuation is off, which
+/// is the point of that knob.
 void BuildWindowContext(Context* ctx,
                         int max_records,
                         string* window_text_out) {
@@ -140,16 +173,38 @@ std::optional<PredictionContext> ContextBuilder::Build(
   if (prompt.empty()) {
     return std::nullopt;
   }
-  if (!IsPinyinPrompt(prompt)) {
+  if (!IsPinyinPrompt(prompt, opt.ai_only)) {
     return std::nullopt;
   }
   // prompt 保留大写（英文缩写如 APPLE），模型能直接处理并回显它。
   int threshold = opt.min_effective_length > 0 ? opt.min_effective_length : 12;
 
+  // window_text has two sources, and the frontend's is strictly better when
+  // available: it is what is actually on screen, so edits the engine never saw
+  // (backspace on committed text, Cmd+A, paste) are already reflected. It is
+  // absent whenever the host app declines to answer -- and an unhandled
+  // BackSpace clears commit_history outright, so the fallback is not merely a
+  // lesser source, it is the only one left. Empty means "use the fallback",
+  // never "the document is empty".
   string window_text;
+  string history_window_text;
+  bool from_frontend = false;
   if (engine && engine->context()) {
-    BuildWindowContext(engine->context(), opt.context_window_size,
-                       &window_text);
+    Context* context = engine->context();
+    if (opt.use_frontend_context) {
+      window_text = TailCodepoints(
+          context->get_property(protocol::kClientContext),
+          opt.context_window_chars);
+      from_frontend = !window_text.empty();
+    }
+    if (from_frontend) {
+      // Also build the fallback for the log, so the two can be compared
+      // offline without a second deploy. Pure string work, no inference.
+      BuildWindowContext(context, opt.context_window_size,
+                         &history_window_text);
+    } else {
+      BuildWindowContext(context, opt.context_window_size, &window_text);
+    }
   }
 
   // Context-first trigger: real Chinese context always fires (the committed
@@ -157,21 +212,29 @@ std::optional<PredictionContext> ContextBuilder::Build(
   // "Real context" means at least one Hanzi, not merely non-empty -- see
   // CountHan.
   bool has_context = CountHan(window_text) > 0;
-  if (!has_context && static_cast<int>(prompt.length()) < threshold) {
-    return std::nullopt;
-  }
-  // Even with context, a one-letter prompt carries almost no signal: the model
-  // just guesses the next character and the offer is never taken (log analysis).
-  // Count letters only -- the syllable-separator apostrophe doesn't add signal.
-  if (has_context) {
-    int letters = std::count_if(prompt.begin(), prompt.end(), [](char c) {
-      return c >= 'a' && c <= 'z';
-    });
-    int min_letters = opt.min_context_prompt_length > 0
-                          ? opt.min_context_prompt_length
-                          : 2;
-    if (letters < min_letters) {
+  // Both length gates exist so the model does not guess where the dictionary
+  // would answer better: a short fragment alone produces a wild continuation,
+  // and the offer is never taken. AI-only mode has no dictionary to defer to,
+  // so a gate there buys nothing but silence -- and since the mode is the only
+  // thing on screen, silence reads as "broken". Both are skipped.
+  if (!opt.ai_only) {
+    if (!has_context && static_cast<int>(prompt.length()) < threshold) {
       return std::nullopt;
+    }
+    // Even with context, a one-letter prompt carries almost no signal: the model
+    // just guesses the next character and the offer is never taken (log
+    // analysis). Count letters only -- the syllable-separator apostrophe doesn't
+    // add signal.
+    if (has_context) {
+      int letters = std::count_if(prompt.begin(), prompt.end(), [](char c) {
+        return c >= 'a' && c <= 'z';
+      });
+      int min_letters = opt.min_context_prompt_length > 0
+                            ? opt.min_context_prompt_length
+                            : 2;
+      if (letters < min_letters) {
+        return std::nullopt;
+      }
     }
   }
 
@@ -179,6 +242,8 @@ std::optional<PredictionContext> ContextBuilder::Build(
   ctx.effective_prompt = prompt;
   ctx.window_text = window_text;
   ctx.windowed = has_context;
+  ctx.window_from_frontend = from_frontend;
+  ctx.history_window_text = history_window_text;
   // Pipe is a safe separator: the prompt is [a-zA-Z'] only, so it never carries
   // one and the split point stays unambiguous no matter how much ASCII the
   // window picks up from thru/raw records.
@@ -187,11 +252,13 @@ std::optional<PredictionContext> ContextBuilder::Build(
   return ctx;
 }
 
-string ExtractDisplayText(const string& model_output) {
-  return StripAllPunctuation(model_output);
+string ExtractDisplayText(const string& model_output, bool filter_punctuation) {
+  return filter_punctuation ? StripAllPunctuation(model_output) : model_output;
 }
 
-bool IsDisplayableCandidate(const string& display, const string& prompt) {
+bool IsDisplayableCandidate(const string& display,
+                            const string& prompt,
+                            bool ai_only) {
   for (char c : display) {
     if (c >= 'a' && c <= 'z') {
       return false;
@@ -207,7 +274,18 @@ bool IsDisplayableCandidate(const string& display, const string& prompt) {
   if (!prompt_has_upper) {
     for (char c : display) {
       if (c >= 'A' && c <= 'Z') {
-        return false;
+        // `ai_only` lets through uppercase the prompt itself carries, in either
+        // case: "t3" answered with "T3" is the model casing the user's own
+        // input, and rejecting it threw away a whole correct sentence over one
+        // letter (log: "cache HIT suppressed ... 机场的T3"). A letter the prompt
+        // never had is still the model inventing an acronym ("qizh" -> "期ZH"),
+        // and ordinary mode keeps rejecting every uppercase without exception.
+        const bool typed_by_user =
+            ai_only &&
+            prompt.find(static_cast<char>(c - 'A' + 'a')) != string::npos;
+        if (!typed_by_user) {
+          return false;
+        }
       }
     }
   }

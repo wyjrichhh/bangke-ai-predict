@@ -33,6 +33,13 @@ struct PredictionContext {
   /// True when issued with a non-empty window_text (context-aware mode); false
   /// for context-free cold start.
   bool windowed = false;
+  /// Whether window_text came from the frontend's read of the host app (true)
+  /// or from commit-history reconstruction (false).
+  bool window_from_frontend = false;
+  /// What the commit-history path would have produced. Only filled when
+  /// window_from_frontend is true, and only for the log -- nothing downstream
+  /// reads it. Exists so the two sources can be compared offline.
+  string history_window_text;
 };
 
 struct ContextBuilderOptions {
@@ -47,6 +54,18 @@ struct ContextBuilderOptions {
   int min_context_prompt_length = 2;
   /// Max history records to scan for the sliding window.
   int context_window_size = 10;
+  /// Take window_text from the text the frontend read out of the host app
+  /// instead of reconstructing it from commit history. The engine alone cannot
+  /// see edits that never entered a composition (backspace on committed text,
+  /// Cmd+A, paste); the frontend can. Falls back when the frontend has nothing.
+  bool use_frontend_context = true;
+  /// Cap on that text, counted in UTF-8 codepoints from the end. The frontend
+  /// reads generously and lets us trim, so this is the single knob for how much
+  /// context reaches the model.
+  int context_window_chars = 24;
+  /// AI-only mode (ai_predict/ai_only): the model is the only candidate source,
+  /// so the two length gates above lose their reason to exist and are skipped.
+  bool ai_only = false;
 };
 
 class ContextBuilder {
@@ -57,18 +76,23 @@ class ContextBuilder {
                                                 const ContextBuilderOptions& opt);
 };
 
-/// Clean a raw model output for display in the candidate menu: strips any
-/// punctuation the model emitted (see BuildWindowContext for why punctuation
-/// is tolerated on input but must never reach a candidate).
-string ExtractDisplayText(const string& model_output);
+/// Clean a raw model output for display in the candidate menu. `filter_punctuation`
+/// strips any punctuation the model emitted (see BuildWindowContext for why
+/// punctuation is tolerated on input); false hands it through untouched, so the
+/// model's own sentence punctuation ("，我们") survives into the candidate.
+string ExtractDisplayText(const string& model_output, bool filter_punctuation);
 
 /// True iff `display` is fit to surface as a candidate. Rejects lowercase
 /// Latin (a half-typed syllable echoed back: "qizh" -> "期ZH"), and rejects
-/// uppercase Latin unless `prompt` itself carried an uppercase acronym (the
-/// user really typed APPLE/IBM, so the model echoing it back is correct). The
+/// uppercase Latin letters the prompt never contained — those are the model
+/// inventing its own acronym. Uppercase the user's own input does carry, e.g.
+/// "t3" answered with "T3", is allowed; so is any uppercase at all when the
+/// prompt itself was an acronym (the user really typed APPLE/IBM). The
 /// candidate must also contain Hanzi so a pure-English echo ("FEATURE") stays
 /// suppressed.
-bool IsDisplayableCandidate(const string& display, const string& prompt);
+bool IsDisplayableCandidate(const string& display,
+                            const string& prompt,
+                            bool ai_only);
 
 /// Number of CJK Unified Ideographs in `text`. Count (not just a presence bool)
 /// so callers can gate on "at least N Hanzi" — e.g. suppress single-Hanzi AI

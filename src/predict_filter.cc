@@ -53,14 +53,21 @@ class AIPredictFilteredTranslation : public Translation {
   AIPredictFilteredTranslation(an<Translation> upstream,
                                const string& ai_text,
                                size_t target_index,
-                               size_t search_range)
+                               size_t search_range,
+                               bool ai_only,
+                               size_t segment_start,
+                               size_t segment_end)
       : upstream_(std::move(upstream)),
         ai_text_(ai_text),
         target_index_(target_index),
-        search_range_(search_range) {
+        search_range_(search_range),
+        ai_only_(ai_only),
+        segment_start_(segment_start),
+        segment_end_(segment_end) {
     Build();
     set_exhausted(cursor_ >= reordered_.size() &&
-                  (!upstream_ || upstream_->exhausted()));
+                  (!PullsFromUpstream() || !upstream_ ||
+                   upstream_->exhausted()));
   }
 
   // -1 means we did not insert an AI-tagged row this round (either the AI
@@ -69,15 +76,21 @@ class AIPredictFilteredTranslation : public Translation {
   // PublishCommentHighlight, which encodes it as the wire payload.
   int ai_inserted_index() const { return ai_inserted_index_; }
 
+  /// Whether candidates keep flowing once `reordered_` runs out. AI-only mode
+  /// makes the translation terminal: the menu is exactly `reordered_`, and
+  /// falling through to upstream would put the whole dictionary back after the
+  /// AI row, which is the opposite of what the mode is for.
+  bool PullsFromUpstream() const { return !ai_only_; }
+
   bool Next() override {
     if (exhausted()) return false;
     if (cursor_ < reordered_.size()) {
       ++cursor_;
-    } else if (upstream_ && !upstream_->exhausted()) {
+    } else if (PullsFromUpstream() && upstream_ && !upstream_->exhausted()) {
       upstream_->Next();
     }
     if (cursor_ >= reordered_.size() &&
-        (!upstream_ || upstream_->exhausted())) {
+        (!PullsFromUpstream() || !upstream_ || upstream_->exhausted())) {
       set_exhausted(true);
     }
     return !exhausted();
@@ -88,7 +101,7 @@ class AIPredictFilteredTranslation : public Translation {
     if (cursor_ < reordered_.size()) {
       return reordered_[cursor_];
     }
-    if (upstream_ && !upstream_->exhausted()) {
+    if (PullsFromUpstream() && upstream_ && !upstream_->exhausted()) {
       return upstream_->Peek();
     }
     return nullptr;
@@ -118,6 +131,40 @@ class AIPredictFilteredTranslation : public Translation {
           ++j;
         }
       }
+    }
+
+    // AI-only mode: the AI row is the entire menu. Everything upstream is
+    // dropped, and so is the "AI" comment -- the mode exists to hand the
+    // candidate list to the model, not to annotate whose it is. Showing
+    // nothing while no prediction is in hand is the point, not a gap to fill
+    // with word candidates.
+    if (ai_only_) {
+      reordered_.clear();
+      if (!ai_text_.empty()) {
+        an<Candidate> ai;
+        for (const auto& c : buf) {
+          if (c && c->type() == kAICandidateType) {
+            ai = c;
+            break;
+          }
+        }
+        if (!ai && segment_end_ > segment_start_) {
+          // Rebuild it spanning the whole segment. Borrowing a word candidate's
+          // range here looks harmless and is not: Segment::Close splits the
+          // segment when the confirmed candidate ends before it does, so a
+          // prediction that happens to be narrower than the input cuts the
+          // composition in two and the commit comes out as the confirmed head
+          // plus the prediction for the tail -- the same sentence, twice.
+          ai = New<SimpleCandidate>(kAICandidateType, segment_start_,
+                                    segment_end_, ai_text_,
+                                    /*comment=*/string());
+        }
+        if (ai) {
+          reordered_.push_back(ai);
+          ai_inserted_index_ = 0;
+        }
+      }
+      return;
     }
 
     if (ai_text_.empty()) {
@@ -189,6 +236,12 @@ class AIPredictFilteredTranslation : public Translation {
   string ai_text_;
   size_t target_index_;
   size_t search_range_;
+  bool ai_only_;
+  /// Extent of the segment being composed, so AI-only mode can span its row
+  /// across the whole thing rather than inherit a word candidate's shorter
+  /// range (see Build).
+  size_t segment_start_ = 0;
+  size_t segment_end_ = 0;
 
   std::vector<an<Candidate>> reordered_;
   size_t cursor_ = 0;
@@ -220,8 +273,13 @@ PredictFilter::PredictFilter(const Ticket& ticket)
   if (cfg->GetBool("ai_predict/enabled", &enabled)) {
     enabled_ = enabled;
   }
+  bool ai_only = false;
+  if (cfg->GetBool("ai_predict/ai_only", &ai_only)) {
+    ai_only_ = ai_only;
+  }
   LOG(INFO) << "ai_predict_filter: ctor target_index=" << target_index_
-            << " search_range=" << search_range_ << " enabled=" << enabled_;
+            << " search_range=" << search_range_ << " enabled=" << enabled_
+            << " ai_only=" << ai_only_;
 }
 
 an<Translation> PredictFilter::Apply(an<Translation> translation,
@@ -230,15 +288,27 @@ an<Translation> PredictFilter::Apply(an<Translation> translation,
     return translation;
   }
   string ai_text = engine_->context()->get_property(kAITextProperty);
-  if (ai_text.empty()) {
+  // In AI-only mode an empty prediction is not "nothing to say" -- it means the
+  // menu is empty, so the upstream must not leak through. Only the ordinary
+  // mode passes the untouched candidate list along.
+  if (ai_text.empty() && !ai_only_) {
     // No AI in flight this Compose; clear any stale highlight from the
     // previous frame so the frontend doesn't keep colouring a row that no
     // longer carries AI semantics.
     PublishCommentHighlight(engine_, -1);
     return translation;
   }
+  // The active segment's extent, for AI-only mode to span its row across.
+  size_t segment_start = 0;
+  size_t segment_end = 0;
+  const Composition& comp = engine_->context()->composition();
+  if (!comp.empty()) {
+    segment_start = comp.back().start;
+    segment_end = comp.back().end;
+  }
   auto wrapped = New<AIPredictFilteredTranslation>(
-      std::move(translation), ai_text, target_index_, search_range_);
+      std::move(translation), ai_text, target_index_, search_range_, ai_only_,
+      segment_start, segment_end);
   // Publish the index where the AI row landed (or -1 if none was inserted,
   // e.g. dedup against slot #1). Synchronous on Compose() so the frontend
   // has the index before it observes the new menu.

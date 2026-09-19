@@ -39,7 +39,7 @@ cd scripts
 python3 analyze_predictions.py
 
 # 改代码 / 重新部署 / 用一段时间后,记录一次带标签的结果
-python3 analyze_predictions.py --record --label "提高quality阈值"
+python3 analyze_predictions.py --record --label "提高min_hanzi阈值"
 
 # 横向对比各次 run(增益型采纳率 / 总体 / 展示数 / 推理数 / p50)
 python3 analyze_predictions.py --show-history
@@ -72,4 +72,4 @@ python3 analyze_predictions.py FILE ...            # 分析归档的日志文件
 
 ## 配置
 
-schema 配置见 `examples/schema.fragment.yaml`。关键 knobs:`model_path`、`min_input_length`、`context_window_size`、`debounce_ms`、`max_tokens`、`device`、`target_index`、`search_range`、`quality`。
+schema 配置见 `examples/schema.fragment.yaml`。关键 knobs:`model_path`、`min_input_length`、`context_window_size`、`debounce_ms`、`max_tokens`、`device`、`target_index`、`search_range`。
