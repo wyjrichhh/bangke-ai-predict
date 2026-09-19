@@ -25,7 +25,7 @@ string StripSpaces(const string& s) {
 }  // namespace
 
 PredictionEngine::PredictionEngine(Engine* engine,
-                                   std::unique_ptr<InferenceBackend> backend,
+                                   std::shared_ptr<InferenceBackend> backend,
                                    const PredictionEngineOptions& opt)
     : engine_(engine), backend_(std::move(backend)), opt_(opt) {
   worker_ = std::thread(&PredictionEngine::WorkerLoop, this);

@@ -205,16 +205,16 @@ bool PredictTranslator::EnsureEngine() {
                << path;
     return false;
   }
-  auto backend = std::make_unique<CT2Backend>();
   InferenceBackendConfig cfg;
   cfg.model_path = path.string();
   cfg.device = device_;
-  if (!backend->Initialize(cfg)) {
+  auto backend = CT2Backend::Shared(cfg);
+  if (!backend) {
     LOG(ERROR) << "ai_predict_translator: failed to initialize CT2 backend";
     return false;
   }
   prediction_ =
-      std::make_unique<PredictionEngine>(engine_, std::move(backend), engine_opt_);
+      std::make_unique<PredictionEngine>(engine_, backend, engine_opt_);
   init_ok_ = true;
   LOG(INFO) << "ai_predict_translator: ready, model=" << path;
   return true;
@@ -224,6 +224,10 @@ an<Translation> PredictTranslator::Query(const string& input,
                                          const Segment& segment) {
   LOG(INFO) << "ai_predict_translator: Query input='" << input << "' segment=["
             << segment.start << "," << segment.end << ")";
+  // pending 只表示「刚 Schedule 完、结果还没落进缓存」。每趟 Query 先清掉，只有真的
+  // 调度了才重新置上：EnsureEngine/Build/is_active_segment 这些提前返回都不代表有推理
+  // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
+  PublishPendingProperty(engine_, false);
   if (!EnsureEngine()) {
     LOG(INFO) << "ai_predict_translator: Query early-return (engine not ready)";
     return nullptr;
@@ -236,9 +240,6 @@ an<Translation> PredictTranslator::Query(const string& input,
     // 命中（正确的复用）；在此清缓存会在前导非拼音段（大写 raw/标点/符号）先于拼音段
     // 被翻译时，反复冲掉拼音段刚算好的结果，造成刷新死循环。
     PublishAITextProperty(engine_, "");
-    // No context, so nothing was scheduled -- drop the flag rather than leave
-    // the frontend refreshing for a prediction that will never arrive.
-    PublishPendingProperty(engine_, false);
     return nullptr;
   }
   LOG(INFO) << "ai_predict_translator: built context"
@@ -270,8 +271,6 @@ an<Translation> PredictTranslator::Query(const string& input,
           CountHan(display) >= min_hanzi_) {
         LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
         PublishAITextProperty(engine_, display);
-        // Nothing more is coming for this key; the frontend can stop refreshing.
-        PublishPendingProperty(engine_, false);
         auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
                                          display, "AI");
         return New<AIPredictTranslation>(cand);
@@ -279,9 +278,6 @@ an<Translation> PredictTranslator::Query(const string& input,
       LOG(INFO) << "ai_predict_translator: cache HIT suppressed (unusable display)"
                 << " raw='" << *raw << "'";
       PublishAITextProperty(engine_, "");
-      // Deterministic outcome: re-scheduling would recompute the same unusable
-      // output, so stop asking the frontend to refresh.
-      PublishPendingProperty(engine_, false);
       return nullptr;
     }
   }
@@ -293,20 +289,24 @@ an<Translation> PredictTranslator::Query(const string& input,
   // 命中→调度 B→B 命中→A 未命中」的乒乓, 候选在词库与 AI 之间来回闪烁。前面的段
   // 前端不读它的 menu, 调度了也白调度, 还抢 cache。
   bool is_active_segment = false;
+  bool user_navigated = false;
   if (engine_ && engine_->context()) {
     const Composition& comp = engine_->context()->composition();
     is_active_segment =
         !comp.empty() && comp.back().start == segment.start &&
         comp.back().end == segment.end;
+    user_navigated = !comp.empty() && comp.back().selected_index > 0;
   }
   if (!is_active_segment) {
     return nullptr;
   }
   prediction_->Schedule(*built);
-  // Raise the flag the frontend watches: it will keep re-composing on its own
-  // thread until a hit clears it, which is how the prediction reaches the menu
-  // without the worker ever touching the Context.
-  PublishPendingProperty(engine_, true);
+  // 置上 pending 就是请前端重排一次。用户已经翻页或移动高亮时不能置：重排会把
+  // selected_index 归零，表现是候选栏自己跳回第一页。仍调度——缓存填上，下次按键
+  // 直接命中，只是这一轮不主动浮现。
+  if (!user_navigated) {
+    PublishPendingProperty(engine_, true);
+  }
   return nullptr;
 }
 

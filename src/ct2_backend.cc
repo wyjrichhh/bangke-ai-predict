@@ -35,8 +35,20 @@ std::string UnkTokenForVocab(const std::unordered_map<std::string, int>& token_t
 
 }  // namespace
 
-CT2Backend::~CT2Backend() {
-  Shutdown();
+std::shared_ptr<CT2Backend> CT2Backend::Shared(
+    const InferenceBackendConfig& config) {
+  // 静态 shared_ptr 的进程退出析构顺序不可控，且线程池热拆除本身不安全
+  // （见头文件），索性永不拆除。
+  static std::mutex inst_mutex;
+  static std::shared_ptr<CT2Backend> instance;
+  std::lock_guard<std::mutex> lock(inst_mutex);
+  if (!instance) {
+    auto backend = std::make_shared<CT2Backend>();
+    if (backend->Initialize(config)) {
+      instance = backend;
+    }
+  }
+  return instance;
 }
 
 bool CT2Backend::Initialize(const InferenceBackendConfig& config) {

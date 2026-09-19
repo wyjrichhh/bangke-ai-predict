@@ -35,7 +35,7 @@ struct PredictionEngineOptions {
 class PredictionEngine {
  public:
   PredictionEngine(Engine* engine,
-                   std::unique_ptr<InferenceBackend> backend,
+                   std::shared_ptr<InferenceBackend> backend,
                    const PredictionEngineOptions& opt);
   ~PredictionEngine();
 
@@ -55,7 +55,8 @@ class PredictionEngine {
   void WorkerLoop();
 
   Engine* engine_;
-  std::unique_ptr<InferenceBackend> backend_;
+  // 共享后端（进程级单例）：会话销毁只减引用，绝不触发 CT2 线程池拆除
+  std::shared_ptr<InferenceBackend> backend_;
   PredictionEngineOptions opt_;
 
   std::thread worker_;
