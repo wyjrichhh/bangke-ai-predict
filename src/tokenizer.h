@@ -13,6 +13,7 @@
 #ifndef RIME_PREDICT_TOKENIZER_H_
 #define RIME_PREDICT_TOKENIZER_H_
 
+#include <cstdint>
 #include <memory>
 #include <set>
 #include <string>
