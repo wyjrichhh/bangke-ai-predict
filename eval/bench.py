@@ -71,7 +71,7 @@ def run(inf: Infer, tests: list[dict], opt: InferenceOptions,
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--testset", default=str(Path(__file__).resolve().parent / "testset.jsonl"))
-    ap.add_argument("--model", default=str(Path.home() / "Library/Rime/predict_models/zh-base-ct2-int8"))
+    ap.add_argument("--model", default=str(Path.home() / "Library/BangkePinyin/predict_models/zh-base-ct2-int8"))
     ap.add_argument("--max-prompt", type=int, default=0)
     ap.add_argument("--min-prompt", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0)

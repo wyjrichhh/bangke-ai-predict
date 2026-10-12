@@ -16,10 +16,11 @@
 #   gets to claim slot #2. The filter then refines/deduplicates.
 #
 # Note: *.custom.yaml files are patch files you create yourself in
-#       ~/Library/Rime/. They do NOT exist by default. Use `cat > ... <<EOF`
+#       ~/Library/BangkePinyin/ (Bangke's private dir, NOT the ~/Library/Rime
+#       shared with Squirrel). They do NOT exist by default. Use `cat > ... <<EOF`
 #       or any editor to create them with the contents below, then redeploy.
 #
-# ─── ~/Library/Rime/default.custom.yaml ──────────────────────────────────────
+# ─── ~/Library/BangkePinyin/default.custom.yaml ──────────────────────────────
 # patch:
 #   schema_list:
 #     - schema: luna_pinyin
@@ -27,7 +28,7 @@
 #   # Append ai_predict to default.yaml's modules list (rime list-append syntax)
 #   'modules/@next': ai_predict
 #
-# ─── ~/Library/Rime/luna_pinyin.custom.yaml ──────────────────────────────────
+# ─── ~/Library/BangkePinyin/luna_pinyin.custom.yaml ──────────────────────────
 # patch:
 #   # zh-base-ct2-int8 仅适配简体；朙月拼音默认开关顺序为 @0 ascii @1 full_shape
 #   # @2 simplification —— states [ 漢字, 汉字 ]，reset: 1 表示默认「汉字」(简体)
@@ -74,6 +75,18 @@
 #     debounce_ms: 200
 #     max_tokens: 64
 #     device: cpu
+#     # ── 解码参数：全部可选，默认跟随模型包 ────────────────────────────────
+#     # 正常情况下这些值写在模型目录的 generation_config.json 里随模型分发，
+#     # 这里写 = 覆盖模型包。优先级（低到高）：
+#     #   插件编译期默认  <  模型包 generation_config.json  <  本文件
+#     # 不写就跟随模型包 —— 推荐做法：换模型时解码约定自动跟着走，无需改配置。
+#     # beam_size: 5
+#     # length_penalty: 1.0
+#     # repetition_penalty: 1.2
+#     # sampling_topk: 1
+#     # sampling_temperature: 1.0
+#     # no_repeat_ngram_size: 0
+#     # compute_type: default       # default | float32 | int8_float32 | ...
 #     # Filter knobs (optional):
 #     target_index: 1             # 0-based slot for the AI candidate (default 1 → 2nd)
 #     search_range: 10            # how many upstream candidates to scan for dedup

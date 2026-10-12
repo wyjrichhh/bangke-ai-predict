@@ -5,7 +5,9 @@
 #   ./scripts/download_model.sh [DEST_DIR]
 #
 # DEST_DIR defaults to: $RIME_USER_DATA_DIR/predict_models/zh-base-ct2-int8
-#                      (RIME_USER_DATA_DIR defaults to ~/Library/Rime on macOS)
+#                      (RIME_USER_DATA_DIR defaults to ~/Library/BangkePinyin,
+#                       Bangke's private dir — NOT the ~/Library/Rime shared
+#                       with Squirrel)
 #
 # Override the source URL (e.g. for a mirror) by setting MODEL_URL.
 
@@ -14,7 +16,7 @@ set -euo pipefail
 DEFAULT_MODEL_URL="https://github.com/wyjrichhh/librime-ai-predict/releases/download/model-v1/zh-base-ct2-int8.tar.gz"
 MODEL_URL="${MODEL_URL:-${DEFAULT_MODEL_URL}}"
 
-: "${RIME_USER_DATA_DIR:=${HOME}/Library/Rime}"
+: "${RIME_USER_DATA_DIR:=${HOME}/Library/BangkePinyin}"
 DEST="${1:-${RIME_USER_DATA_DIR}/predict_models/zh-base-ct2-int8}"
 
 main() {

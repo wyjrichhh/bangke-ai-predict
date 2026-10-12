@@ -29,7 +29,8 @@ namespace predict {
 
 struct PredictionEngineOptions {
   int debounce_ms = 200;
-  int max_tokens = 256;
+  // nullopt = schema 没配，交给后端用模型包 generation_config.json 里的值
+  std::optional<int> max_tokens;
 };
 
 class PredictionEngine {

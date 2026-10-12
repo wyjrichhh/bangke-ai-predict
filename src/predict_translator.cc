@@ -138,6 +138,36 @@ void PredictTranslator::LoadOptions() {
   if (config->GetString("ai_predict/device", &dev)) {
     device_ = dev;
   }
+  // 解码参数全部可选：只在 schema 真写了才填，否则留空让模型包的
+  // generation_config.json 决定（见 CT2Backend::ResolveDecodeParams）。
+  int beam = 0;
+  if (config->GetInt("ai_predict/beam_size", &beam) && beam > 0) {
+    decode_.beam_size = beam;
+  }
+  double lp = 0;
+  if (config->GetDouble("ai_predict/length_penalty", &lp)) {
+    decode_.length_penalty = static_cast<float>(lp);
+  }
+  double rp = 0;
+  if (config->GetDouble("ai_predict/repetition_penalty", &rp)) {
+    decode_.repetition_penalty = static_cast<float>(rp);
+  }
+  int topk = 0;
+  if (config->GetInt("ai_predict/sampling_topk", &topk) && topk > 0) {
+    decode_.sampling_topk = topk;
+  }
+  double temp = 0;
+  if (config->GetDouble("ai_predict/sampling_temperature", &temp)) {
+    decode_.sampling_temperature = static_cast<float>(temp);
+  }
+  int ngram = -1;
+  if (config->GetInt("ai_predict/no_repeat_ngram_size", &ngram) && ngram >= 0) {
+    decode_.no_repeat_ngram_size = ngram;
+  }
+  string compute_type;
+  if (config->GetString("ai_predict/compute_type", &compute_type)) {
+    decode_.compute_type = compute_type;
+  }
   if (config->GetInt("ai_predict/min_hanzi", &n) && n > 0) {
     min_hanzi_ = n;
   }
@@ -165,7 +195,10 @@ void PredictTranslator::LoadOptions() {
             << " context_window_chars=" << ctx_opt_.context_window_chars
             << " use_frontend_context=" << ctx_opt_.use_frontend_context
             << " debounce_ms=" << engine_opt_.debounce_ms
-            << " max_tokens=" << engine_opt_.max_tokens
+            << " max_tokens="
+            << (engine_opt_.max_tokens
+                    ? std::to_string(*engine_opt_.max_tokens)
+                    : std::string("<模型包>"))
             << " device=" << device_
             << " min_hanzi=" << min_hanzi_
             << " filter_punctuation=" << filter_punctuation_
@@ -188,6 +221,17 @@ bool PredictTranslator::EnsureEngine() {
   if (!enabled_) {
     return false;
   }
+
+  auto path = ResolveModelPath();
+
+  // 换了模型（路径变了）就不该继续用旧引擎，也不该被上一次的失败锁死：
+  // 两个 latch 都归零，让下面的流程重新走一遍。
+  if (path.string() != engine_path_) {
+    init_attempted_ = false;
+    init_ok_ = false;
+    prediction_.reset();
+  }
+
   if (init_ok_ && prediction_) {
     return true;
   }
@@ -195,7 +239,7 @@ bool PredictTranslator::EnsureEngine() {
     return false;
   }
   init_attempted_ = true;
-  auto path = ResolveModelPath();
+  engine_path_ = path.string();
   if (path.empty()) {
     LOG(ERROR) << "ai_predict_translator: ai_predict/model_path is not set";
     return false;
@@ -208,6 +252,7 @@ bool PredictTranslator::EnsureEngine() {
   InferenceBackendConfig cfg;
   cfg.model_path = path.string();
   cfg.device = device_;
+  cfg.decode = decode_;
   auto backend = CT2Backend::Shared(cfg);
   if (!backend) {
     LOG(ERROR) << "ai_predict_translator: failed to initialize CT2 backend";

@@ -33,6 +33,8 @@ class PredictTranslator : public Translator {
   PredictionEngineOptions engine_opt_;
   std::string model_path_raw_;
   std::string device_;
+  /// schema 里显式写了的解码参数；未写的项留空，让模型包的值生效
+  DecodeParams decode_;
   /// Kill switch: false makes the translator inert without touching the
   /// schema's translators/filters lists (see ai_predict/enabled).
   bool enabled_ = true;
@@ -48,6 +50,9 @@ class PredictTranslator : public Translator {
   std::unique_ptr<PredictionEngine> prediction_;
   bool init_attempted_ = false;
   bool init_ok_ = false;
+  /// 上次尝试初始化的模型目录。与当前配置不一致时说明换了模型，两个 latch
+  /// 都要归零，否则旧引擎会一直被复用、失败状态也解不开。
+  std::string engine_path_;
 };
 
 }  // namespace predict

@@ -34,7 +34,7 @@ often did the user take it.
 
 USAGE
 -----
-  ./analyze_predictions.py                      # auto-find Squirrel logs
+  ./analyze_predictions.py                      # auto-find plugin logs
   ./analyze_predictions.py --log-dir DIR        # explicit dir
   ./analyze_predictions.py LOGFILE ...          # explicit files
   ./analyze_predictions.py --record --label "baseline"   # append run to history
@@ -58,12 +58,17 @@ from datetime import datetime
 
 _LOG_BASENAME_GLOB = "rime.squirrel.ai_predict.*.log"
 # Where the plugin writes its glog files. The frontend normally sets
-# RIME_LOG_DIR so logs land in ~/Library/Logs/Squirrel/, but when that var is
-# absent the plugin's glog falls back to $TMPDIR (macOS: a per-user
-# /var/folders/.../T/rime.squirrel/). We scan both so the eval never silently
-# reads stale data just because the host stopped exporting RIME_LOG_DIR.
+# RIME_LOG_DIR so logs land in ~/Library/Logs/BangkePinyin/ (Bangke's own log
+# dir); ~/Library/Logs/Squirrel is kept for historical logs from when this
+# plugin ran under Squirrel. When RIME_LOG_DIR is absent the plugin's glog
+# falls back to $TMPDIR (macOS: a per-user /var/folders/.../T/rime.squirrel/).
+# We scan all so the eval never silently reads stale data just because the
+# host stopped exporting RIME_LOG_DIR.
 def _default_log_dirs() -> list[str]:
-    dirs = [os.path.expanduser("~/Library/Logs/Squirrel")]
+    dirs = [
+        os.path.expanduser("~/Library/Logs/BangkePinyin"),
+        os.path.expanduser("~/Library/Logs/Squirrel"),
+    ]
     tmp = os.environ.get("TMPDIR") or "/tmp"
     dirs.append(os.path.join(tmp, "rime.squirrel"))
     return dirs

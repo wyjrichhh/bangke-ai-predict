@@ -66,6 +66,7 @@ set(RIME_AI_PREDICT_SRC
   src/prediction_engine.cc
   src/context_builder.cc
   src/ct2_backend.cc
+  src/tokenizer.cc
   src/frontend_protocol.cc
 )
 

@@ -104,7 +104,45 @@ ai_predict:
 
 ### 方式 B：手动放置
 
-把含 `shared_vocabulary.json`、`tokenizer.json`、`model.bin`、`config.json` 的目录放到上述路径下即可，无需运行脚本。
+把含 `shared_vocabulary.json`、`tokenizer.json`、`model.bin`、`config.json` 的目录放到上述路径下即可，无需运行脚本。可选再放一份 `generation_config.json` 携带该模型的推荐解码参数（见下）。
+
+模型目录里的文件必须**成套**：`tokenizer.json` 声明的分词器管线、`shared_vocabulary.json` 与 `model.bin` 三者要互相匹配。装配不一致时插件会在启动阶段直接报错并关闭 AI 预测，而不是带着错配的词表继续推理。
+
+### 支持的分词器
+
+按 `tokenizer.json` 的四段管线（normalizer / pre_tokenizer / model / decoder）分派，目前实现两种组合：
+
+| 模型 | pre_tokenizer | model | decoder |
+|---|---|---|---|
+| GPT-2 系（`zh-base-ct2-int8`） | `ByteLevel` | `BPE` | `ByteLevel` |
+| SentencePiece 系（`ct2_t183_int8`） | `Split`（字符类，`Isolated`） | `Unigram` | `Fuse` |
+
+Unigram 侧的 normalizer 只认 `Sequence[Replace(Regex "\s+" → "")]`。其它组合（Metaspace 预分词、WordPiece、非字符类的 Split 正则等）**一律明确拒绝并说明差异**——不做近似匹配，因为猜错的表现是分词悄悄变形，比直接不启用难查得多。要加新组合，在 `src/tokenizer.cc` 的 `Tokenizer::Create` 里加分支并补一个实现。
+
+### 解码参数从哪来
+
+优先级由低到高：
+
+1. 插件内置的编译期默认值
+2. 模型目录的 `generation_config.json`
+3. schema 里显式写的 `ai_predict/*`（覆盖用）
+
+推荐把模型自己的解码约定写进 `generation_config.json`，随模型包一起分发。这样换模型时参数自动跟着走，用户和宿主都不必关心；调参也不必重新发版。
+
+```json
+{
+  "beam_size": 5,
+  "length_penalty": 1.0,
+  "repetition_penalty": 1.2,
+  "sampling_topk": 1,
+  "sampling_temperature": 1.0,
+  "no_repeat_ngram_size": 0,
+  "max_tokens": 64,
+  "compute_type": "default"
+}
+```
+
+该文件缺失时静默落到编译期默认值（兼容不带它的模型）。可用键与 schema 侧一一对应，见 `examples/schema.fragment.yaml`。
 
 ## 模块与配置名（避免与官方 predict 冲突）
 

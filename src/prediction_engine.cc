@@ -111,7 +111,9 @@ void PredictionEngine::WorkerLoop() {
     }
 
     LOG(INFO) << "PredictionEngine: invoking backend ct2_input='" << ct2_input
-              << "' max_tokens=" << opt_.max_tokens;
+              << "' max_tokens="
+              << (opt_.max_tokens ? std::to_string(*opt_.max_tokens)
+                                  : std::string("<模型包>"));
     auto t0 = std::chrono::steady_clock::now();
     auto result = backend_->Predict(ct2_input, opt_.max_tokens);
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

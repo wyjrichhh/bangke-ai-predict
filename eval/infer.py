@@ -27,7 +27,7 @@ from tokenizers import Tokenizer
 
 # ---------------------------------------------------------------- defaults --
 # Mirrors ct2_backend.cc constants + schema.fragment.yaml defaults.
-DEFAULT_MODEL = Path.home() / "Library/Rime/predict_models/zh-base-ct2-int8"
+DEFAULT_MODEL = Path.home() / "Library/BangkePinyin/predict_models/zh-base-ct2-int8"
 
 # Bytes that are "direct" in GPT-2's bytes_to_unicode(): printable ASCII plus
 # the Latin-1 supplement ranges, matching the C++ buildUnicodeToByteMap.

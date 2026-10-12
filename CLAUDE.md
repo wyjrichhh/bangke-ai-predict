@@ -18,9 +18,9 @@ librime 的 CTranslate2 推理插件,为拼音输入实时补 AI 候选。模型
 
 ### 数据来源与方法论前提(重要)
 
-推理历史是插件的 glog 输出:`~/Library/Logs/Squirrel/rime.squirrel.ai_predict.*.log`。
+推理历史是插件的 glog 输出:`~/Library/Logs/BangkePinyin/rime.squirrel.ai_predict.*.log`(Bangke 宿主把 `RIME_LOG_DIR` 指到这里;`~/Library/Logs/Squirrel/` 里是早期跑在鼠须管下的历史日志)。
 
-> ⚠️ **日志可能落在 `$TMPDIR/rime.squirrel/`**。插件 glog 的 `FLAGS_log_dir` 靠宿主传 `RIME_LOG_DIR`/`GOOGLE_LOG_DIR`;两者都缺失时(如某些方式启动的 Squirrel 进程)fallback 到 `$TMPDIR`(macOS 上是 `/var/folders/.../T/rime.squirrel/`),**不在** `~/Library/Logs/Squirrel/`。`analyze_predictions.py` 默认已同时扫这两处(`_default_log_dirs()`)。若发现"重新部署用了一段时间却零变化",八成是只读到了旧日志——先 `lsof -p <squirrel_pid> | grep ai_predict` 确认日志真实落点,或 `find $TMPDIR -iname '*ai_predict*.log*'`。根因排查见 `predict_module.cc:EnsurePluginLoggingInitialized`。
+> ⚠️ **日志可能落在 `$TMPDIR/rime.squirrel/`**。插件 glog 的 `FLAGS_log_dir` 靠宿主传 `RIME_LOG_DIR`/`GOOGLE_LOG_DIR`;两者都缺失时(如某些方式启动的输入法进程)fallback 到 `$TMPDIR`(macOS 上是 `/var/folders/.../T/rime.squirrel/`),**不在** `~/Library/Logs/BangkePinyin/`。`analyze_predictions.py` 默认已同时扫这几处(`_default_log_dirs()`)。若发现"重新部署用了一段时间却零变化",八成是只读到了旧日志——先 `lsof -p <ime_pid> | grep ai_predict` 确认日志真实落点,或 `find $TMPDIR -iname '*ai_predict*.log*'`。根因排查见 `predict_module.cc:EnsurePluginLoggingInitialized`。
 
 **日志不直接记录用户是否选中 AI 候选**,只记录 AI *展示了什么*。选中靠启发式回溯:用户每提交一段,就进入 `commit_history`,成为下一次推理 `window_text` 的前缀。所以 `window_text` 的增量 == 用户实际提交的内容。**AI 展示文本 == 下一次 window 增量 ⇒ 判为被选中**。
 
