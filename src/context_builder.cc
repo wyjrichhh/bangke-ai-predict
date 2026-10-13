@@ -259,8 +259,12 @@ std::optional<PredictionContext> ContextBuilder::Build(
 /// 小写字母时，删掉它就是用户想要的结果。
 ///
 /// **两个及以上一律不动**：那多半是模型有意吐出的英文/缩写（"google"、"AI" 的小写
-/// 形态），删了才是真的错。除汉字外出现任何别的字符（数字、大写、符号）也不动 ——
-/// 规则只认"纯中文 + 恰好一个小写字母"这一种形状。
+/// 形态），删了才是真的错。
+///
+/// 判断"是不是一句中文"只看**汉字之外的 ASCII**：中文标点、全角符号、空格都不算阻碍
+/// （正常的中文输出本来就带它们，`ai_predict/filter_punctuation` 关掉时句号会留着），
+/// 出现别的 ASCII —— 数字、大写字母 —— 才放弃。真机踩过：只认"汉字 + 小写字母"两种
+/// 字符时，句末一个 `。` 就让整条规则永不触发（日志：display='我想看下输入u。'）。
 string StripLoneLowercaseLetter(const string& text) {
   size_t lone_at = string::npos;
   int lowercase = 0;
@@ -280,7 +284,9 @@ string StripLoneLowercaseLetter(const string& text) {
       lone_at = static_cast<size_t>(pos - text.data());
       continue;
     }
-    return text;
+    if (cp < 0x80 && cp != ' ') {
+      return text;
+    }
   }
   if (lowercase != 1 || hanzi == 0) {
     return text;
