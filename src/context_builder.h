@@ -90,9 +90,7 @@ string ExtractDisplayText(const string& model_output, bool filter_punctuation);
 /// prompt itself was an acronym (the user really typed APPLE/IBM). The
 /// candidate must also contain Hanzi so a pure-English echo ("FEATURE") stays
 /// suppressed.
-bool IsDisplayableCandidate(const string& display,
-                            const string& prompt,
-                            bool ai_only);
+bool IsDisplayableCandidate(const string& display);
 
 /// Number of CJK Unified Ideographs in `text`. Count (not just a presence bool)
 /// so callers can gate on "at least N Hanzi" — e.g. suppress single-Hanzi AI

@@ -278,7 +278,21 @@ an<Translation> PredictTranslator::Query(const string& input,
     return nullptr;
   }
 
-  auto built = ContextBuilder::Build(engine_, input, ctx_opt_);
+  // 推理要的是**用户打出来的完整输入**，不是当前这一段。
+  //
+  // composition 会被分段切开：前几个音节能翻成词、后面那段翻不出来（打错了、多了字母）
+  // 时，段会变成 [29,99) 这样——参数 input 只是那一段的尾巴，模型拿不到前半句，
+  // 于是只能给出半截答案（日志实测：input='ufashihen...' → 'ufa是很好用的…'）。
+  // 已上屏的中文不在 input 里（它走 commit_history 进 window），所以这里取全串不会
+  // 重复。段的 start/end 仍然只用于候选跨度，不受影响。
+  string prompt_input = input;
+  if (engine_ && engine_->context()) {
+    Context* ctx = engine_->context();
+    const string& full = ctx->input();
+    const size_t caret = ctx->caret_pos();
+    prompt_input = caret < full.size() ? full.substr(0, caret) : full;
+  }
+  auto built = ContextBuilder::Build(engine_, prompt_input, ctx_opt_);
   if (!built) {
     LOG(INFO) << "ai_predict_translator: Query no context built (input too short / no commit history)";
     // 失败路径不清缓存：缓存按 window_text|prompt 作 key，旧结果只会在同一输入下
@@ -305,14 +319,11 @@ an<Translation> PredictTranslator::Query(const string& input,
     if (!raw->empty()) {
       const string display = ExtractDisplayText(*raw, filter_punctuation_);
       // A cached result is deterministic: if its display text is unusable
-      // (empty after punctuation strip, carrying Latin residue, or a single
-      // Hanzi the dictionary ranks better), re-scheduling would recompute the
-      // SAME unusable output and refresh again -- a busy loop. So on a HIT we
-      // either surface the candidate or give up for this key; we never fall
-      // through to Schedule().
-      if (!display.empty() &&
-          IsDisplayableCandidate(display, built->effective_prompt,
-                                 ctx_opt_.ai_only) &&
+      // (empty after punctuation strip, or too few Hanzi), re-scheduling would
+      // recompute the SAME unusable output and refresh again -- a busy loop. So
+      // on a HIT we either surface the candidate or give up for this key; we
+      // never fall through to Schedule().
+      if (!display.empty() && IsDisplayableCandidate(display) &&
           CountHan(display) >= min_hanzi_) {
         LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
         PublishAITextProperty(engine_, display);

@@ -120,11 +120,11 @@ string StripAllPunctuation(const string& text) {
 /// "我下午3点去T3航站楼" into "我下午点去航站楼".
 ///
 /// The model takes mixed Hanzi/Latin/digit/punctuation context without replaying
-/// it (measured against the shipped model), and any residue it does emit is
-/// caught downstream anyway: IsDisplayableCandidate requires Hanzi and rejects
-/// Latin, so ASCII cannot reach a candidate. Punctuation is the exception --
-/// ExtractDisplayText keeps it when ai_predict/filter_punctuation is off, which
-/// is the point of that knob.
+/// it (measured against the shipped model). Residue it does emit is passed
+/// through as-is -- IsDisplayableCandidate only asks for Hanzi now, so a stray
+/// letter costs a candidate its polish, not its existence. Punctuation is the
+/// exception -- ExtractDisplayText keeps it when ai_predict/filter_punctuation
+/// is off, which is the point of that knob.
 void BuildWindowContext(Context* ctx,
                         int max_records,
                         string* window_text_out) {
@@ -252,43 +252,59 @@ std::optional<PredictionContext> ContextBuilder::Build(
   return ctx;
 }
 
-string ExtractDisplayText(const string& model_output, bool filter_punctuation) {
-  return filter_punctuation ? StripAllPunctuation(model_output) : model_output;
+/// 去掉「整句中文里夹的那**一个**小写字母」。
+///
+/// 打错拼音时模型常给出几乎正确的整句，只把没消掉的那个字母原样留在中间
+/// （日志："我想知道现在这个输入u法是不是正常的推理。"）。整句都是汉字、只多一个
+/// 小写字母时，删掉它就是用户想要的结果。
+///
+/// **两个及以上一律不动**：那多半是模型有意吐出的英文/缩写（"google"、"AI" 的小写
+/// 形态），删了才是真的错。除汉字外出现任何别的字符（数字、大写、符号）也不动 ——
+/// 规则只认"纯中文 + 恰好一个小写字母"这一种形状。
+string StripLoneLowercaseLetter(const string& text) {
+  size_t lone_at = string::npos;
+  int lowercase = 0;
+  int hanzi = 0;
+  auto it = text.begin();
+  while (it != text.end()) {
+    const char* pos = &*it;
+    const uint32_t cp = utf8::next(it, text.end());
+    if (cp >= 0x4E00 && cp <= 0x9FFF) {
+      ++hanzi;
+      continue;
+    }
+    if (cp >= 'a' && cp <= 'z') {
+      if (++lowercase > 1) {
+        return text;
+      }
+      lone_at = static_cast<size_t>(pos - text.data());
+      continue;
+    }
+    return text;
+  }
+  if (lowercase != 1 || hanzi == 0) {
+    return text;
+  }
+  string out = text;
+  out.erase(lone_at, 1);  // ASCII 小写是单字节，直接抹掉不会切坏 UTF-8
+  return out;
 }
 
-bool IsDisplayableCandidate(const string& display,
-                            const string& prompt,
-                            bool ai_only) {
-  for (char c : display) {
-    if (c >= 'a' && c <= 'z') {
-      return false;
-    }
-  }
-  bool prompt_has_upper = false;
-  for (char c : prompt) {
-    if (c >= 'A' && c <= 'Z') {
-      prompt_has_upper = true;
-      break;
-    }
-  }
-  if (!prompt_has_upper) {
-    for (char c : display) {
-      if (c >= 'A' && c <= 'Z') {
-        // `ai_only` lets through uppercase the prompt itself carries, in either
-        // case: "t3" answered with "T3" is the model casing the user's own
-        // input, and rejecting it threw away a whole correct sentence over one
-        // letter (log: "cache HIT suppressed ... 机场的T3"). A letter the prompt
-        // never had is still the model inventing an acronym ("qizh" -> "期ZH"),
-        // and ordinary mode keeps rejecting every uppercase without exception.
-        const bool typed_by_user =
-            ai_only &&
-            prompt.find(static_cast<char>(c - 'A' + 'a')) != string::npos;
-        if (!typed_by_user) {
-          return false;
-        }
-      }
-    }
-  }
+string ExtractDisplayText(const string& model_output, bool filter_punctuation) {
+  return StripLoneLowercaseLetter(filter_punctuation
+                                      ? StripAllPunctuation(model_output)
+                                      : model_output);
+}
+
+bool IsDisplayableCandidate(const string& display) {
+  // 只要含汉字就交出去 —— 不再因为夹着 ASCII 就把整条答案丢掉。
+  //
+  // 原来这里把「带 ASCII 的输出」判成模型瞎编（"qizh" → "期ZH"）一律丢弃，但真机
+  // 日志里更常见的是模型**几乎答对**、只把没转换成功的字母原样留着：
+  //   raw='我想知道现在这个输入ufa是不是正常的推理。'  → cache HIT suppressed
+  // 唯一瑕疵是多打的 u，整条被判死之后用户在第 2 位什么都看不到，只能回头选词库里
+  // 那半截候选。应用层不改模型输出的一个字符，只负责把它交给候选列表；
+  // 「消掉多余字母」该由模型自己解决。
   return CountHan(display) > 0;
 }
 
