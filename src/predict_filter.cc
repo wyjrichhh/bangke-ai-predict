@@ -196,29 +196,35 @@ class AIPredictFilteredTranslation : public Translation {
 
     // Promote an existing match (wrapped so type/preedit/quality survive and
     // only the comment changes) rather than inserting a second copy.
-    an<Candidate> ai_cand;
     auto dup = std::find_if(buf.begin() + 1, buf.end(),
                             [this](const an<Candidate>& c) {
                               return c && c->text() == ai_text_;
                             });
+
+    // AI 候选一律按**整段跨度**造，不要借上游候选的 range。
+    //
+    // 借 range 看着无害，其实会把 commit 切坏：phrase 候选允许子跨度（只覆盖前几个音节），
+    // 而 librime 的 Composition::GetCommitText 是「候选的 text + 把 cand->end() 之后的输入
+    // **原样**补上」—— 于是预测文本上屏后，尾巴会被原样再打一遍；Segment::Close 还会因此
+    // 把段落切成两半（"the same sentence, twice"）。真机实测（macOS 与 Linux 同源）：
+    // 打 …yongdeshuurufa（shu 后多打了一个 u），选中 AI 的「…使用的输入法」，
+    // 上屏的却是「…使用的输入法urufa」。
+    // ai_only 模式早就为此改成整段跨度了（见上面那段注释），正常模式这两条分支漏了。
+    auto carrier = New<SimpleCandidate>(kAICandidateType, segment_start_,
+                                        segment_end_, ai_text_,
+                                        /*comment=*/string());
+    an<Candidate> ai_cand =
+        New<ShadowCandidate>(carrier, kAICandidateType,
+                             /*text=*/string(), kAICommentMarker,
+                             /*inherit_comment=*/false);
+
     if (dup != buf.end()) {
-      auto matched = *dup;
       size_t orig_pos = std::distance(buf.begin(), dup);
       buf.erase(dup);
-      ai_cand = New<ShadowCandidate>(matched, kAICandidateType,
-                                     /*text=*/string(),
-                                     /*comment=*/kAICommentMarker,
-                                     /*inherit_comment=*/false);
       LOG(INFO) << "ai_predict_filter: promoted existing candidate '"
-                << matched->text() << "' (was at slot #" << orig_pos
-                << ", type=" << matched->type() << ") to slot #"
-                << target_index_ << " with AI marker";
+                << ai_text_ << "' (was at slot #" << orig_pos
+                << ") to slot #" << target_index_ << " with AI marker";
     } else {
-      // ShadowCandidate（shadow 到上游首候选）：librime 对 shadow 候选的
-      // 确认/commit 走标准路径；SimpleCandidate 自定义类型选中时 commit 为空
-      ai_cand = New<ShadowCandidate>(buf.front(), kAICandidateType,
-                                     ai_text_, kAICommentMarker,
-                                     /*inherit_comment=*/false);
       LOG(INFO) << "ai_predict_filter: inserted new AI candidate '"
                 << ai_text_ << "' at slot #" << target_index_;
     }
