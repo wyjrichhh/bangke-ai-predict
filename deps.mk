@@ -58,6 +58,7 @@ ctranslate2:
 		echo "Installed cpu_features.a to $(prefix)/lib/"; \
 	fi
 	@# RUY's static dependencies must be included in the archive used by the plugin.
+	@# MRI uses simple aliases because its parser does not support quoted paths.
 	set -eu; \
 	ruy_dir=$$(cd "$(deps_dir)/CTranslate2/$(build)/third_party/ruy" && pwd); \
 	set -- "$$ruy_dir/ruy"/libruy*.a \

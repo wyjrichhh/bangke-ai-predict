@@ -17,36 +17,16 @@
 
 namespace {
 
-// Whether the plugin owns glog is a per-platform question, because how glog is
-// linked differs.
-//
-// macOS/Windows: the plugin statically links its own copy, so the process holds
-// two glog instances that can't see each other. This is by design -- the librime
-// maintainers won't change the main project's linking (rime/librime#983, #984).
-// An uninitialized instance would send our LOG calls to a dead sink and the
-// logs would vanish, so the plugin must initialize its own.
-//
-// Linux distribution builds: glog is a shared library shared with the host, so
-// there is only one instance and the host (fcitx5) has already initialized it.
-// Initializing again is redundant, and the matching ShutdownGoogleLogging on
-// finalize would tear down the host's logging with it. So the plugin touches
-// neither.
-//
-// The guard is a static bool rather than google::IsGoogleLoggingInitialized(),
-// which does not exist in glog 0.5 (Ubuntu 22.04).
-//
-// Naming convention (all platforms):
-//   - log_dir comes from RIME_LOG_DIR / GOOGLE_LOG_DIR (set by the frontend);
-//   - program name is the host's deployer.app_name + ".ai_predict", producing
-//     "rime.<frontend>.ai_predict.*.log.INFO" -- physically separate from the
-//     main process's "rime.<frontend>.*.log.INFO".
-void EnsurePluginLoggingInitialized() {
-  static bool initialized = false;
-  if (initialized) {
-    return;
-  }
-  initialized = true;
+// Static linking does not imply a separate glog instance: Windows links this
+// plugin into rime.dll and resolves both users to the same symbols. Detect the
+// actual instance and never reconfigure or shut down a logger owned by the host.
+#if defined(__APPLE__) || defined(_WIN32)
+bool plugin_owns_logging = false;
+#endif
 
+void EnsurePluginLoggingInitialized() {
+#if defined(__APPLE__) || defined(_WIN32)
+  if (google::IsGoogleLoggingInitialized()) return;
   if (const char* dir = std::getenv("RIME_LOG_DIR")) {
     if (dir[0] != '\0') {
       FLAGS_log_dir = dir;
@@ -69,8 +49,8 @@ void EnsurePluginLoggingInitialized() {
   google::SetLogSymlink(google::GLOG_WARNING, app_name.c_str());
   google::SetLogSymlink(google::GLOG_ERROR, app_name.c_str());
   FLAGS_logfile_mode = 0600;
-#if defined(__APPLE__) || defined(_WIN32)
   google::InitGoogleLogging(app_name.c_str());
+  plugin_owns_logging = true;
 #endif
 }
 
@@ -88,9 +68,10 @@ static void rime_ai_predict_initialize() {
 
 static void rime_ai_predict_finalize() {
 #if defined(__APPLE__) || defined(_WIN32)
-  if (google::IsGoogleLoggingInitialized()) {
+  if (plugin_owns_logging && google::IsGoogleLoggingInitialized()) {
     google::ShutdownGoogleLogging();
   }
+  plugin_owns_logging = false;
 #endif
 }
 
