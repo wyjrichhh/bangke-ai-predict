@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "ct2_backend.h"
 #include "predict_filter.h"
 #include "predict_translator.h"
 
@@ -67,6 +68,7 @@ static void rime_ai_predict_initialize() {
 }
 
 static void rime_ai_predict_finalize() {
+  rime::predict::CT2Backend::ReleaseShared();
 #if defined(__APPLE__) || defined(_WIN32)
   if (plugin_owns_logging && google::IsGoogleLoggingInitialized()) {
     google::ShutdownGoogleLogging();

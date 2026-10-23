@@ -39,6 +39,17 @@ std::string UnkTokenForVocab(const std::unordered_map<std::string, int>& token_t
 
 namespace {
 
+struct SharedBackendCache {
+  std::mutex mutex;
+  std::shared_ptr<CT2Backend> instance;
+  std::string key;
+};
+
+SharedBackendCache& BackendCache() {
+  static SharedBackendCache cache;
+  return cache;
+}
+
 // 配置指纹：模型路径、device 与全部解码参数。任一不同就要换一个后端实例——
 // 解码参数是在 Initialize 里解析并固化到实例上的，只换参数不换模型同样要重建。
 std::string ConfigKey(const InferenceBackendConfig& c) {
@@ -86,18 +97,16 @@ CT2Backend::~CT2Backend() {
 
 std::shared_ptr<CT2Backend> CT2Backend::Shared(
     const InferenceBackendConfig& config) {
-  static std::mutex inst_mutex;
-  static std::shared_ptr<CT2Backend> instance;
-  static std::string instance_key;
+  auto& cache = BackendCache();
 
   const std::string key = ConfigKey(config);
 
   std::shared_ptr<CT2Backend> result;
   std::shared_ptr<CT2Backend> retired;
   {
-    std::lock_guard<std::mutex> lock(inst_mutex);
-    if (instance && instance_key == key) {
-      return instance;
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.instance && cache.key == key) {
+      return cache.instance;
     }
 
     auto backend = std::make_shared<CT2Backend>();
@@ -105,15 +114,31 @@ std::shared_ptr<CT2Backend> CT2Backend::Shared(
       // 保留现有实例：新模型坏掉不该连带把能用的旧模型也弄没。
       return nullptr;
     }
-    retired = std::move(instance);
-    instance = std::move(backend);
-    instance_key = key;
-    result = instance;
+    retired = std::move(cache.instance);
+    cache.instance = std::move(backend);
+    cache.key = key;
+    result = cache.instance;
   }
 
   // 出锁再放：旧实例的拆除（后台线程）不该压在换代锁上。
   retired.reset();
   return result;
+}
+
+void CT2Backend::ReleaseShared() {
+  std::shared_ptr<CT2Backend> retired;
+  {
+    auto& cache = BackendCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    retired = std::move(cache.instance);
+    cache.key.clear();
+  }
+  if (retired) {
+    // Sessions and prediction workers have stopped. Join model destruction on
+    // a separate thread before returning to the host or unloading the DLL.
+    std::thread shutdown([backend = std::move(retired)] { backend->Shutdown(); });
+    shutdown.join();
+  }
 }
 
 bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
@@ -200,7 +225,9 @@ void CT2Backend::Shutdown() {
     return;
   }
 
-  LOG(INFO) << "CT2Backend shutting down";
+  if (google::IsGoogleLoggingInitialized()) {
+    LOG(INFO) << "CT2Backend shutting down";
+  }
   translator_.reset();
   tokenizer_.reset();
   token_to_id_.clear();

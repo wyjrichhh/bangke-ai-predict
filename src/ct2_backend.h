@@ -51,6 +51,9 @@ class CT2Backend : public InferenceBackend {
   static std::shared_ptr<CT2Backend> Shared(
       const InferenceBackendConfig& config);
 
+  // Call after prediction workers stop, before DLL teardown prevents cleanup.
+  static void ReleaseShared();
+
   bool Initialize(const InferenceBackendConfig& config) override;
   void Shutdown() override;
   bool IsInitialized() const override {
