@@ -39,19 +39,18 @@ if(NOT CTRANSLATE2_INCLUDE_DIR OR NOT CTRANSLATE2_LIBRARY)
 endif()
 
 set(CTRANSLATE2_LIBRARIES ${CTRANSLATE2_LIBRARY})
+find_library(RUY_LIBRARY NAMES ruy
+  PATHS "${CTRANSLATE2_ROOT}/lib" NO_DEFAULT_PATH
+)
+if(RUY_LIBRARY)
+  list(APPEND CTRANSLATE2_LIBRARIES ${RUY_LIBRARY})
+endif()
+# Static dependencies follow the library that references them.
 find_library(CPU_FEATURES_LIBRARY NAMES cpu_features
   PATHS "${CTRANSLATE2_ROOT}/lib" NO_DEFAULT_PATH
 )
 if(CPU_FEATURES_LIBRARY)
   list(APPEND CTRANSLATE2_LIBRARIES ${CPU_FEATURES_LIBRARY})
-endif()
-# Windows/ruy 后端：AVX 打包符号在独立 ruy.lib，未并入 ctranslate2.lib
-find_library(RUY_LIBRARY NAMES ruy
-  PATHS "${CTRANSLATE2_ROOT}/lib" NO_DEFAULT_PATH
-)
-if(RUY_LIBRARY)
-  # ruy 依赖 cpuinfo 符号，静态库按序解析：ruy 必须排在 cpu_features 之前
-  list(INSERT CTRANSLATE2_LIBRARIES 0 ${RUY_LIBRARY})
 endif()
 if(APPLE)
   find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
@@ -81,17 +80,8 @@ target_include_directories(rime-ai-predict-objs PRIVATE
 )
 target_link_libraries(rime-ai-predict-objs PRIVATE ${CTRANSLATE2_LIBRARIES})
 
-# glog 0.7+ headers require these macros (same idea as librime/CMakeLists.txt).
-if(WIN32)
-  target_compile_definitions(rime-ai-predict-objs PRIVATE
-    "GLOG_DEPRECATED=__declspec(deprecated)"
-    GLOG_NO_ABBREVIATED_SEVERITIES)
-else()
-  target_compile_definitions(rime-ai-predict-objs PRIVATE
-    "GLOG_DEPRECATED=__attribute__((deprecated))"
-    "GLOG_EXPORT="
-    "GLOG_NO_EXPORT=")
-endif()
+# librime supplies glog definitions for the host's selected linkage. Overriding
+# visibility here would give host and plugin conflicting declarations.
 
 set(plugin_name ${plugin_library} PARENT_SCOPE)
 set(plugin_objs $<TARGET_OBJECTS:rime-ai-predict-objs> PARENT_SCOPE)

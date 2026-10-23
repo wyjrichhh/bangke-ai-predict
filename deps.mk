@@ -35,7 +35,7 @@ clean-dist:
 	rm -rf $(prefix)/include/ctranslate2 || true
 
 ctranslate2:
-	cd $(deps_dir)/CTranslate2; \
+	cd "$(deps_dir)/CTranslate2" && \
 	cmake . -B$(build) \
 	-DBUILD_SHARED_LIBS:BOOL=OFF \
 	-DBUILD_CLI:BOOL=OFF \
@@ -45,7 +45,7 @@ ctranslate2:
 	-DWITH_OPENBLAS:BOOL=OFF \
 	-DWITH_RUY:BOOL=ON \
 	-DWITH_ACCELERATE:BOOL=$(if $(filter Darwin,$(OS_NAME)),ON,OFF) \
-	-DCMAKE_POLICY_VERSION_MINIMUM:STRING=3.5 \
+	-DCMAKE_POLICY_VERSION_MINIMUM:STRING=3.10 \
 	-DOPENMP_RUNTIME:STRING="NONE" \
 	-DCMAKE_BUILD_TYPE:STRING="Release" \
 	-DCMAKE_INSTALL_PREFIX:PATH="$(prefix)" \
@@ -57,14 +57,24 @@ ctranslate2:
 		cp "$(deps_dir)/CTranslate2/$(build)/third_party/cpu_features/libcpu_features.a" "$(prefix)/lib/"; \
 		echo "Installed cpu_features.a to $(prefix)/lib/"; \
 	fi
-	@# WITH_RUY 时 ruy 被编成数十个子归档，而静态库不吸收依赖；合并成一个 libruy.a
-	@# 放进 prefix/lib，插件的 find_library(RUY_LIBRARY) 才找得到。
+	@# RUY's static dependencies must be included in the archive used by the plugin.
+	set -eu; \
 	ruy_dir="$(deps_dir)/CTranslate2/$(build)/third_party/ruy"; \
-	if [ -d "$$ruy_dir/ruy" ]; then \
-		libtool -static -o "$(prefix)/lib/libruy.a" \
-			"$$ruy_dir/ruy"/libruy*.a \
-			"$$ruy_dir/ruy/profiler/libruy_profiler_instrumentation.a" \
-			"$$ruy_dir/third_party/cpuinfo/libcpuinfo.a" \
-			"$$ruy_dir/third_party/cpuinfo/deps/clog/libclog.a" 2>/dev/null; \
-		echo "Installed libruy.a to $(prefix)/lib/"; \
-	fi
+	set -- "$$ruy_dir/ruy"/libruy*.a \
+		"$$ruy_dir/ruy/profiler/libruy_profiler_instrumentation.a" \
+		"$$ruy_dir/third_party/cpuinfo/libcpuinfo.a" \
+		"$$ruy_dir/third_party/cpuinfo/deps/clog/libclog.a"; \
+	for archive do test -f "$$archive"; $(AR) -t "$$archive" > /dev/null; done; \
+	case "$(OS_NAME)" in \
+		Darwin) libtool -static -o "$(prefix)/lib/libruy.a" "$$@" ;; \
+		Linux) \
+			mri=$$(mktemp); \
+			trap 'rm -f "$$mri"' 0; \
+			printf 'CREATE "%s"\n' "$(prefix)/lib/libruy.a" > "$$mri"; \
+			for archive do printf 'ADDLIB "%s"\n' "$$archive" >> "$$mri"; done; \
+			printf 'SAVE\nEND\n' >> "$$mri"; \
+			$(AR) -M < "$$mri" ;; \
+		*) echo "Unsupported archive platform: $(OS_NAME)" >&2; exit 1 ;; \
+	esac; \
+	test -s "$(prefix)/lib/libruy.a"; \
+	echo "Installed libruy.a to $(prefix)/lib/"
