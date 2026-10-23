@@ -59,7 +59,7 @@ ctranslate2:
 	fi
 	@# RUY's static dependencies must be included in the archive used by the plugin.
 	set -eu; \
-	ruy_dir="$(deps_dir)/CTranslate2/$(build)/third_party/ruy"; \
+	ruy_dir=$$(cd "$(deps_dir)/CTranslate2/$(build)/third_party/ruy" && pwd); \
 	set -- "$$ruy_dir/ruy"/libruy*.a \
 		"$$ruy_dir/ruy/profiler/libruy_profiler_instrumentation.a" \
 		"$$ruy_dir/third_party/cpuinfo/libcpuinfo.a" \
@@ -68,12 +68,18 @@ ctranslate2:
 	case "$(OS_NAME)" in \
 		Darwin) libtool -static -o "$(prefix)/lib/libruy.a" "$$@" ;; \
 		Linux) \
-			mri=$$(mktemp); \
-			trap 'rm -f "$$mri"' 0; \
-			printf 'CREATE "%s"\n' "$(prefix)/lib/libruy.a" > "$$mri"; \
-			for archive do printf 'ADDLIB "%s"\n' "$$archive" >> "$$mri"; done; \
-			printf 'SAVE\nEND\n' >> "$$mri"; \
-			$(AR) -M < "$$mri" ;; \
+			staging=$$(mktemp -d); \
+			trap 'rm -rf "$$staging"' 0; \
+			printf 'CREATE merged.a\n' > "$$staging/merge.mri"; \
+			index=0; \
+			for archive do \
+				ln -s "$$archive" "$$staging/input-$$index.a"; \
+				printf 'ADDLIB input-%s.a\n' "$$index" >> "$$staging/merge.mri"; \
+				index=$$((index + 1)); \
+			done; \
+			printf 'SAVE\nEND\n' >> "$$staging/merge.mri"; \
+			(cd "$$staging" && $(AR) -M < merge.mri); \
+			mv "$$staging/merged.a" "$(prefix)/lib/libruy.a" ;; \
 		*) echo "Unsupported archive platform: $(OS_NAME)" >&2; exit 1 ;; \
 	esac; \
 	test -s "$(prefix)/lib/libruy.a"; \
