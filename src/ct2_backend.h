@@ -34,12 +34,7 @@ constexpr float kCt2DefaultSamplingTemperature = 1.0f;
 constexpr int kCt2DefaultNoRepeatNgramSize = 0;
 constexpr int kCt2DefaultNumHypotheses = 1;
 constexpr int64_t kCt2DefaultTimeoutMs = 5000;
-#ifdef _WIN32
-// Nested pool destructors join threads under the Windows TLS loader lock.
-constexpr int kCt2DefaultIntraThreads = 1;
-#else
 constexpr int kCt2DefaultIntraThreads = 4;
-#endif
 constexpr const char* kCt2DefaultComputeType = "default";
 
 class CT2Backend : public InferenceBackend {
