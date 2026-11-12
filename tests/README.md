@@ -40,14 +40,16 @@ modified. Source and temporary directory must be on the same filesystem for the
 hard link. Windows acceptance must also exercise the installed input method in
 the existing Chinese account and its real Chinese dictionary.
 
-Only new `ai_predict_init` records use the bounded redaction helper. Technical
+Initialization ERROR records use the bounded redaction helper. Per-stage and
+per-key INFO and input/prediction/candidate bodies are not emitted. Technical
 `what` messages are retained only for the fixed model-initialization stage
 allowlist; other runtime messages are omitted while type/code metadata remains.
 Device values are emitted only as `cpu`, `cuda` or `other`. Windows failure
 records additionally sample `GlobalMemoryStatusEx` physical/commit availability
-and its success/error result; other platforms explicitly mark it unsupported. Existing
-ordinary INFO messages may still contain input/context/model paths. They are not
-covered by a claim that all historical logs are sanitized. Customer exception
+and its success/error result; other platforms explicitly mark it unsupported.
+The plugin no longer logs input, context, prediction text or full model paths at
+the reviewed call sites. Historical logs and other host components are outside
+this guarantee. Customer exception
 capture and release ERROR file output still require the actual Windows build.
 
 The real-model fixture explicitly releases the EXE's shared backend, verifies

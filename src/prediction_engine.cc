@@ -110,10 +110,6 @@ void PredictionEngine::WorkerLoop() {
       continue;
     }
 
-    LOG(INFO) << "PredictionEngine: invoking backend ct2_input='" << ct2_input
-              << "' max_tokens="
-              << (opt_.max_tokens ? std::to_string(*opt_.max_tokens)
-                                  : std::string("<模型包>"));
     auto t0 = std::chrono::steady_clock::now();
     auto result = backend_->Predict(ct2_input, opt_.max_tokens);
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -124,8 +120,6 @@ void PredictionEngine::WorkerLoop() {
                    << dt_ms << " ms)";
       continue;
     }
-    LOG(INFO) << "PredictionEngine: backend returned raw='" << *result
-              << "' (took " << dt_ms << " ms)";
 
     {
       std::lock_guard<std::mutex> lock(result_mutex_);
@@ -148,8 +142,7 @@ void PredictionEngine::WorkerLoop() {
     // the client thread: PredictTranslator::Query raises ai_predict/pending on
     // a cache miss and clears it on a hit, and the frontend forces a refresh
     // from its own thread while that flag is up.
-    LOG(INFO) << "PredictionEngine: cached result for cache_key='" << cache_key
-              << "'; frontend surfaces it";
+
     (void)prompt_snap;
   }
 }

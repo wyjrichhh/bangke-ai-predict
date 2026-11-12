@@ -191,7 +191,7 @@ void PredictTranslator::LoadOptions() {
     ctx_opt_.ai_only = ai_only;
   }
   LOG(INFO) << "ai_predict_translator: options loaded"
-            << " model_path=" << model_path_raw_
+            << " model_configured=" << !model_path_raw_.empty()
             << " min_input_length=" << ctx_opt_.min_effective_length
             << " min_context_prompt_length=" << ctx_opt_.min_context_prompt_length
             << " context_window_size=" << ctx_opt_.context_window_size
@@ -202,7 +202,7 @@ void PredictTranslator::LoadOptions() {
             << (engine_opt_.max_tokens
                     ? std::to_string(*engine_opt_.max_tokens)
                     : std::string("<模型包>"))
-            << " device=" << device_
+            << " device=" << InitTraceDevice(device_)
             << " min_hanzi=" << min_hanzi_
             << " filter_punctuation=" << filter_punctuation_
             << " ai_only=" << ctx_opt_.ai_only
@@ -260,8 +260,7 @@ bool PredictTranslator::EnsureEngine() {
   TraceInitStage("vocabulary_exists", "begin", model_path_raw_, device_);
   if (!std::filesystem::exists(path / "shared_vocabulary.json")) {
     TraceInitStage("vocabulary_failure_log", "failed", model_path_raw_, device_);
-    LOG(ERROR) << "ai_predict_translator: model directory missing shared_vocabulary.json: "
-               << path.u8string();
+    LOG(ERROR) << "ai_predict_translator: model directory missing shared_vocabulary.json";
     return false;
   }
   TraceInitStage("vocabulary_exists", "end", model_path_raw_, device_);
@@ -284,7 +283,7 @@ bool PredictTranslator::EnsureEngine() {
   TraceInitStage("prediction_engine", "end", model_path_raw_, device_);
   init_ok_ = true;
   TraceInitStage("ready_log", "begin", model_path_raw_, device_);
-  LOG(INFO) << "ai_predict_translator: ready, model=" << path.u8string();
+  LOG(INFO) << "ai_predict_translator: model ready";
   TraceInitStage("ensure_engine", "end", model_path_raw_, device_);
   return true;
 }
@@ -294,15 +293,14 @@ an<Translation> PredictTranslator::Query(const string& input,
   InitTraceScope trace_scope;
   try {
     TraceInitStage("query", "begin", model_path_raw_, device_);
-    LOG(INFO) << "ai_predict_translator: Query input='" << input << "' segment=["
-              << segment.start << "," << segment.end << ")";
+
     // pending 只表示「刚 Schedule 完、结果还没落进缓存」。每趟 Query 先清掉，只有真的
     // 调度了才重新置上：EnsureEngine/Build/is_active_segment 这些提前返回都不代表有推理
     // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
     PublishPendingProperty(engine_, false);
     if (!EnsureEngine()) {
       ClearFailedPrediction();
-      LOG(INFO) << "ai_predict_translator: Query early-return (engine not ready)";
+
       return nullptr;
     }
 
@@ -323,26 +321,12 @@ an<Translation> PredictTranslator::Query(const string& input,
     }
     auto built = ContextBuilder::Build(engine_, prompt_input, ctx_opt_);
     if (!built) {
-      LOG(INFO) << "ai_predict_translator: Query no context built (input too short / no commit history)";
       // 失败路径不清缓存：缓存按 window_text|prompt 作 key，旧结果只会在同一输入下
       // 命中（正确的复用）；在此清缓存会在前导非拼音段（大写 raw/标点/符号）先于拼音段
       // 被翻译时，反复冲掉拼音段刚算好的结果，造成刷新死循环。
       PublishAITextProperty(engine_, "");
       return nullptr;
     }
-    LOG(INFO) << "ai_predict_translator: built context"
-              << " mode=" << (built->windowed ? "windowed" : "direct")
-              << " window_source="
-              << (built->window_from_frontend ? "frontend" : "history")
-              << " window_text='" << built->window_text << "'"
-              // Only present when the window came from the frontend: what the
-              // history path would have said instead. Lets the two be compared
-              // offline -- if they disagree often, the frontend read is suspect.
-              << (built->window_from_frontend
-                      ? " history_window='" + built->history_window_text + "'"
-                      : "")
-              << " effective_prompt='" << built->effective_prompt << "'"
-              << " cache_key='" << built->cache_key << "'";
 
     if (auto raw = prediction_->GetCachedResult(built->cache_key)) {
       if (!raw->empty()) {
@@ -354,20 +338,18 @@ an<Translation> PredictTranslator::Query(const string& input,
         // never fall through to Schedule().
         if (!display.empty() && IsDisplayableCandidate(display) &&
             CountHan(display) >= min_hanzi_) {
-          LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
+
           PublishAITextProperty(engine_, display);
           auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
                                            display, "AI");
           return New<AIPredictTranslation>(cand);
         }
-        LOG(INFO) << "ai_predict_translator: cache HIT suppressed (unusable display)"
-                  << " raw='" << *raw << "'";
+
         PublishAITextProperty(engine_, "");
         return nullptr;
       }
     }
 
-    LOG(INFO) << "ai_predict_translator: cache MISS, scheduling inference";
     PublishAITextProperty(engine_, "");
     // 只有「当前段」（最后一个 segment）才调度推理。composition 会被大写 raw 段切成
     // 多个拼音段, 若每个段都各自调度, 单槽 cache 会被多段轮流覆盖, 形成「A 命中→B 未

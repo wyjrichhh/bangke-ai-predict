@@ -2,6 +2,7 @@
 // Distributed under the BSD License
 
 #include "tokenizer.h"
+#include "init_trace.h"
 
 #include <glog/logging.h>
 
@@ -536,7 +537,8 @@ std::unique_ptr<Tokenizer> Tokenizer::Create(
   try {
     file >> j;
   } catch (const std::exception& e) {
-    *reason = std::string("parse tokenizer.json: ") + e.what();
+    TraceInitException(e, tokenizer_json_path, "other");
+    *reason = "parse tokenizer.json failed";
     return nullptr;
   }
 

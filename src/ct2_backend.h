@@ -87,6 +87,7 @@ class CT2Backend : public InferenceBackend {
   /// 分词行为全在 tokenizer 里（按 tokenizer.json 的管线选实现），本类只转发。
   std::unique_ptr<Tokenizer> tokenizer_;
   std::atomic<bool> initialized_{false};
+  std::string device_ = "other";
   std::mutex mutex_;
 
   std::unordered_map<std::string, int> token_to_id_;

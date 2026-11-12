@@ -101,21 +101,11 @@ inline std::string SanitizeInitMessage(const char* message,
   return text;
 }
 
-inline void TraceInitStage(const char* stage, const char* phase,
-                           const std::string& model_path,
-                           const std::string& device) noexcept {
-  InitTraceErrorState preserve_errors;
+// Track phases internally; only failures emit diagnostics. Scopes preserve reentrant callers.
+inline void TraceInitStage(const char* stage, const char*,
+                           const std::string&,
+                           const std::string&) noexcept {
   init_trace_stage = stage;
-  try {
-    const bool non_ascii = std::any_of(model_path.begin(), model_path.end(),
-        [](unsigned char ch) { return ch >= 128; });
-    LOG(INFO) << "ai_predict_init stage=" << stage << " phase=" << phase
-              << " device='" << InitTraceDevice(device) << "'"
-              << " model_configured=" << !model_path.empty()
-              << " model_nonascii=" << non_ascii << " model_bytes=" << model_path.size();
-  } catch (...) {
-    std::fputs("ai_predict_init: stage diagnostics unavailable\n", stderr);
-  }
 }
 
 inline void TraceInitFailure(const char* stage, const char* kind,

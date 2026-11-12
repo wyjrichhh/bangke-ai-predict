@@ -22,6 +22,9 @@
 #include <stdexcept>
 #include <typeinfo>
 #include <vector>
+#ifdef _WIN32
+#include <RestartManager.h>
+#endif
 
 namespace fs = std::filesystem;
 using namespace rime::predict;
@@ -52,8 +55,7 @@ class Capture : public google::LogSink {
       SetLastError(5678);
 #endif
     }
-    if (std::string(message, bytes).find("ai_predict_init ") == 0)
-      entries_.push_back({severity, std::string(message, bytes)});
+    entries_.push_back({severity, std::string(message, bytes)});
   }
   bool Contains(google::LogSeverity severity, const std::string& text) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -64,7 +66,7 @@ class Capture : public google::LogSink {
   std::string LastError() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto i = entries_.rbegin(); i != entries_.rend(); ++i)
-      if (i->severity == google::GLOG_ERROR) return i->message;
+      if (i->severity == google::GLOG_ERROR && i->message.find("ai_predict_init ") == 0) return i->message;
     return {};
   }
  private:
@@ -84,6 +86,43 @@ struct TempDirectory {
     if (ec) std::cerr << "cleanup failed code=" << ec.value() << '\n';
   }
 };
+
+#ifdef _WIN32
+static void DumpModelOwners(const fs::path& root) {
+  std::error_code ec;
+  for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+    if (it->path().filename() != "model.bin") continue;
+    DWORD session = 0;
+    WCHAR key[CCH_RM_SESSION_KEY + 1]{};
+    DWORD result = RmStartSession(&session, 0, key);
+    if (result != ERROR_SUCCESS) { std::cerr << "rm_start_error=" << result << '\n'; return; }
+    const auto native = it->path().wstring();
+    LPCWSTR resource = native.c_str();
+    result = RmRegisterResources(session, 1, &resource, 0, nullptr, 0, nullptr);
+    UINT needed = 0, count = 0;
+    DWORD reasons = 0;
+    if (result == ERROR_SUCCESS) result = RmGetList(session, &needed, &count, nullptr, &reasons);
+    if (result == ERROR_MORE_DATA) {
+      std::vector<RM_PROCESS_INFO> owners(needed);
+      count = needed;
+      result = RmGetList(session, &needed, &count, owners.data(), &reasons);
+      if (result == ERROR_SUCCESS) for (UINT i = 0; i < count; ++i) {
+        WCHAR image[32768]{};
+        DWORD length = 32768;
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owners[i].Process.dwProcessId);
+        const bool named = process && QueryFullProcessImageNameW(process, 0, image, &length);
+        if (process) CloseHandle(process);
+        std::wcerr << L"rm_owner_pid=" << owners[i].Process.dwProcessId
+                   << L" session=" << owners[i].TSSessionId << L" app="
+                   << (named ? fs::path(image).filename().wstring() : L"unknown") << L'\n';
+      }
+    }
+    std::cerr << "rm_result=" << result << '\n';
+    RmEndSession(session);
+    return;
+  }
+}
+#endif
 
 static void Write(const fs::path& path, const std::string& content) {
   std::ofstream stream(path);
@@ -190,12 +229,14 @@ static int RunTests(const fs::path& model_source) {
       context->set_property("ai_predict/text", "stale");
       auto connection = context->property_update_notifier().connect(inject);
       const char* outer_stage = init_trace_stage;
-      Require(!translator.Query("n", rime::Segment(0, 1)), "failed AI returns no translation");
+      Require(!translator.Query("synthetic_input_secret", rime::Segment(0, 22)), "failed AI returns no translation");
       connection.disconnect();
       Require(init_trace_stage == outer_stage, "Query restores its caller stage after an exception");
       Require(context->get_property("ai_predict/pending").empty() &&
               context->get_property("ai_predict/text").empty(),
               "AI failure clears both properties despite a throwing notification");
+      for (auto severity : {google::GLOG_INFO, google::GLOG_WARNING, google::GLOG_ERROR})
+        Require(!capture.Contains(severity, "synthetic_input_secret"), "input body is absent from plugin logs");
       const auto error = capture.LastError();
       Require(error.find("stage=query phase=failed") != std::string::npos &&
               error.find("exception_kind=system_error") != std::string::npos &&
@@ -340,8 +381,8 @@ static int RunTests(const fs::path& model_source) {
       Require(real.Initialize(config), "real CPU model still initializes");
       Require(real.Predict("nihao", 8).value_or("").size() > 0, "normal model prediction is unchanged");
       real.Shutdown();
-      Require(capture.Contains(google::GLOG_INFO, "stage=ct2_tokenizer_self_test phase=end"),
-              "Release INFO sink records normal completion");
+      Require(!capture.Contains(google::GLOG_INFO, "phase=end"),
+              "successful initialization does not emit per-stage INFO");
     }
     Require(CT2Backend::ReleaseShared(), "explicit release drains background model teardown");
     if (!model_source.empty()) {
@@ -362,7 +403,14 @@ static int RunTests(const fs::path& model_source) {
     CT2Backend::StartShared();
     Require(CT2Backend::ReleaseShared(), "empty reinitialized lifecycle also finalizes");
     api->finalize();
-    fs::remove_all(temp.path);
+    std::error_code cleanup_error;
+    fs::remove_all(temp.path, cleanup_error);
+    if (cleanup_error) {
+#ifdef _WIN32
+      DumpModelOwners(temp.path);
+#endif
+      throw fs::filesystem_error("remove isolated fixture", cleanup_error);
+    }
     Require(!fs::exists(temp.path), "remove isolated fixture directory");
     capture.Stop();
     google::ShutdownGoogleLogging();

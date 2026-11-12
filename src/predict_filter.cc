@@ -188,8 +188,7 @@ class AIPredictFilteredTranslation : public Translation {
     }
 
     if (buf.front() && buf.front()->text() == ai_text_) {
-      LOG(INFO) << "ai_predict_filter: dedup -- AI text '" << ai_text_
-                << "' already at slot #1; leaving candidate list unchanged";
+
       reordered_ = std::move(buf);
       return;
     }
@@ -219,14 +218,7 @@ class AIPredictFilteredTranslation : public Translation {
                              /*inherit_comment=*/false);
 
     if (dup != buf.end()) {
-      size_t orig_pos = std::distance(buf.begin(), dup);
       buf.erase(dup);
-      LOG(INFO) << "ai_predict_filter: promoted existing candidate '"
-                << ai_text_ << "' (was at slot #" << orig_pos
-                << ") to slot #" << target_index_ << " with AI marker";
-    } else {
-      LOG(INFO) << "ai_predict_filter: inserted new AI candidate '"
-                << ai_text_ << "' at slot #" << target_index_;
     }
 
     // 4. Splice with AI at target_index_.

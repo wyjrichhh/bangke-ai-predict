@@ -245,9 +245,9 @@ bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
 
   const std::string& model_path = config.model_path;
   const std::string& device = config.device;
+  device_ = InitTraceDevice(device);
 
-  LOG(INFO) << "CT2Backend initialize model_path=" << model_path
-            << " device=" << device;
+  LOG(INFO) << "CT2Backend initialize device=" << InitTraceDevice(device);
 
   try {
     // 必须在建 Translator 之前：compute_type 是构造参数
@@ -300,8 +300,8 @@ bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
                                    unk_token_, &tokenizer_error);
     if (!tokenizer_) {
       TraceInitStage("ct2_tokenizer", "failed", model_path, device);
-      LOG(ERROR) << "CT2Backend: " << tokenizer_error
-                 << "; AI prediction stays off instead of emitting [UNK].";
+      TraceInitFailure("ct2_tokenizer", "tokenizer_error", "none", 0, 0,
+                       tokenizer_error.c_str(), model_path, device_);
       translator_.reset();
       return false;
     }
@@ -423,16 +423,12 @@ std::optional<std::string> CT2Backend::Predict(
       return std::nullopt;
     }
 
-    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::steady_clock::now() - start_time)
-                           .count();
-    DLOG(INFO) << "CT2Backend::Predict " << result.size() << " chars in "
-               << duration_ms << "ms";
-
     return result;
 
   } catch (const std::exception& e) {
-    LOG(ERROR) << "CT2Backend::Predict: " << e.what();
+    TraceInitScope trace_scope;
+    TraceInitStage("prediction", "failed", "", device_);
+    TraceInitException(e, "", device_);
     return std::nullopt;
   }
 }
@@ -440,7 +436,7 @@ std::optional<std::string> CT2Backend::Predict(
 bool CT2Backend::LoadSharedVocabulary(const std::string& path) {
   std::ifstream file(std::filesystem::u8path(path));
   if (!file.is_open()) {
-    LOG(ERROR) << "CT2Backend: cannot open " << path;
+    LOG(ERROR) << "CT2Backend: cannot open shared_vocabulary.json";
     return false;
   }
 
@@ -465,7 +461,7 @@ bool CT2Backend::LoadSharedVocabulary(const std::string& path) {
               << " tokens from shared_vocabulary.json";
     return id > 0;
   } catch (const std::exception& e) {
-    LOG(ERROR) << "CT2Backend: parse shared_vocabulary.json: " << e.what();
+    TraceInitException(e, path, device_);
     return false;
   }
 }
@@ -510,7 +506,7 @@ void CT2Backend::ResolveDecodeParams(const std::string& model_path,
         compute_type_ = j["compute_type"].get<std::string>();
       }
     } catch (const std::exception& e) {
-      LOG(WARNING) << "CT2Backend: parse generation_config.json: " << e.what();
+      TraceInitException(e, model_path, device_);
     }
   }
 
@@ -544,10 +540,7 @@ bool CT2Backend::VerifyTokenizerSelfTest() {
   std::vector<std::string> probe_tokens = tokenizer_->Encode(kProbe);
   for (const auto& token : probe_tokens) {
     if (token == unk_token_) {
-      LOG(ERROR) << "CT2Backend: tokenizer self-test failed on \"" << kProbe
-                 << "\" (produced " << unk_token_
-                 << "); the model directory's tokenizer does not match this"
-                 << " build. AI prediction stays off.";
+      LOG(ERROR) << "CT2Backend: tokenizer self-test produced an unknown token";
       return false;
     }
   }
@@ -563,9 +556,7 @@ bool CT2Backend::VerifyTokenizerSelfTest() {
     options.max_decoding_length = max_tokens_;
     translator_->translate_batch({probe_tokens}, options);
   } catch (const std::exception& e) {
-    LOG(ERROR) << "CT2Backend: warmup inference failed (" << e.what()
-               << "); the model directory is inconsistent — its vocabulary and"
-               << " model.bin do not match. AI prediction stays off.";
+    TraceInitException(e, "", device_);
     return false;
   }
   return true;
