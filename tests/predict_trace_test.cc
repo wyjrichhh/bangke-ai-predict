@@ -90,12 +90,17 @@ static int RunTests(const fs::path& model_source) {
     Write(temp.path / "default.yaml", "schema_list: []\n");
     Write(temp.path / "user.yaml", "{}\n");
     const auto root = temp.path.u8string();
-    const auto native_log_root = temp.path.string();
     RimeTraits traits{};
     RIME_STRUCT_INIT(RimeTraits, traits);
     traits.shared_data_dir = root.c_str();
     traits.user_data_dir = root.c_str();
+#ifdef _WIN32
+    // The DLL's private glog keeps file handles until process exit.
+    traits.log_dir = "";
+#else
+    const auto native_log_root = temp.path.string();
     traits.log_dir = native_log_root.c_str();
+#endif
     traits.app_name = "rime.ai_trace_test";
     const char* modules[] = {"core", "dict", "gears", nullptr};
     traits.modules = modules;

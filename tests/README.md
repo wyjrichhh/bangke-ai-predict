@@ -26,6 +26,11 @@ path-redacted messages, and original exception type/what/code after rethrow.
 It calls Query twice to ensure capture adds no failure latch or fail-open state
 cleanup. CT2 keeps its original false return for a broken model.
 
+On Windows this fixture directs the Rime DLL's private glog to stderr because
+its log handles live until process exit; the EXE's in-memory Capture sink still
+checks trace records. Actual Windows ERROR file persistence is verified by the
+separate CAPI producer and installation acceptance, not by this fixture.
+
 Optionally set `-DBANGKE_AI_TEST_MODEL_DIR=<existing-known-working-model>` to add
 `predict_trace_model`, which reads the existing model without copying or changing
 it and verifies CPU initialization and one prediction plus completion traces.
