@@ -318,7 +318,7 @@ static int RunTests(const fs::path& model_source) {
           fs::copy_file(entry.path(), target);
       }
       config.model_path = unicode_model.u8string();
-      engine->schema()->config()->SetString("ai_predict/model_path", config.model_path);
+      engine->schema()->config()->SetString("ai_predict/model_path", config.model_path.c_str());
       PredictTranslator unicode_translator(rime::Ticket(engine.get(), "ai_predict"));
       Require(PredictInitTest::Ensure(unicode_translator), "translator resolves and loads the Unicode model path");
       Require(real.Initialize(config), "real CPU model still initializes");
