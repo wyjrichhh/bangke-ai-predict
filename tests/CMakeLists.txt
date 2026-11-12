@@ -22,15 +22,8 @@ target_include_directories(predict_trace_test PRIVATE ../src)
 target_include_directories(predict_trace_test PRIVATE "${CTRANSLATE2_ROOT}/include")
 target_link_libraries(predict_trace_test PRIVATE ${plugin_deps} "${AI_TEST_GLOG_LIBRARY}")
 if(WIN32)
-  # These helper implementations are not exported by the matching Rime DLL.
-  target_sources(predict_trace_test PRIVATE
-    "${RIME_ROOT}/src/rime/translation.cc"
-    "${RIME_ROOT}/src/rime/candidate.cc"
-    "${RIME_ROOT}/src/rime/gear/filter_commons.cc")
-  if(MSVC)
-    set_source_files_properties("${RIME_ROOT}/src/rime/translation.cc"
-      PROPERTIES COMPILE_OPTIONS "/URIME_IMPORTS")
-  endif()
+  # Supply only non-exported helpers; exported Translation methods stay in the DLL.
+  target_sources(predict_trace_test PRIVATE rime_windows_helpers.cc)
   target_link_libraries(predict_trace_test PRIVATE dbghelp)
 endif()
 if(MSVC)
