@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "ct2_backend.h"
 #include "predict_filter.h"
 #include "predict_translator.h"
 
@@ -58,6 +59,7 @@ void EnsurePluginLoggingInitialized() {
 
 static void rime_ai_predict_initialize() {
   EnsurePluginLoggingInitialized();
+  rime::predict::CT2Backend::StartShared();
   LOG(INFO) << "registering components from module 'ai_predict'.";
   rime::Registry& r = rime::Registry::instance();
   r.Register("ai_predict_translator",
@@ -67,6 +69,9 @@ static void rime_ai_predict_initialize() {
 }
 
 static void rime_ai_predict_finalize() {
+  if (!rime::predict::CT2Backend::ReleaseShared()) {
+    LOG(ERROR) << "CT2Backend: shared release incomplete";
+  }
 #if defined(__APPLE__) || defined(_WIN32)
   if (plugin_owns_logging && google::IsGoogleLoggingInitialized()) {
     google::ShutdownGoogleLogging();

@@ -52,6 +52,11 @@ class CT2Backend : public InferenceBackend {
       const InferenceBackendConfig& config);
 
   bool Initialize(const InferenceBackendConfig& config) override;
+  // Lifecycle calls must be serialized; stop sessions/workers and drop external
+  // backend references before ReleaseShared waits for background teardown.
+  static void StartShared();
+  static bool ReleaseShared();
+
   void Shutdown() override;
   bool IsInitialized() const override {
     return initialized_.load(std::memory_order_acquire);

@@ -321,12 +321,46 @@ static int RunTests(const fs::path& model_source) {
       engine->schema()->config()->SetString("ai_predict/model_path", config.model_path.c_str());
       PredictTranslator unicode_translator(rime::Ticket(engine.get(), "ai_predict"));
       Require(PredictInitTest::Ensure(unicode_translator), "translator resolves and loads the Unicode model path");
+      for (const char* corrupt : {"shared_vocabulary.json", "tokenizer.json"}) {
+        const auto invalid_model = temp.path / fs::u8path(std::string("invalid-") + corrupt);
+        fs::create_directories(invalid_model);
+        for (const auto& entry : fs::directory_iterator(unicode_model)) {
+          if (!entry.is_regular_file()) continue;
+          const auto target = invalid_model / entry.path().filename();
+          if (entry.path().filename() == "model.bin")
+            fs::create_hard_link(entry.path(), target);
+          else
+            fs::copy_file(entry.path(), target);
+        }
+        Write(invalid_model / corrupt, "{invalid-json");
+        auto broken = config;
+        broken.model_path = invalid_model.u8string();
+        Require(!CT2Backend::Shared(broken), "post-construction model metadata failure returns without deadlock");
+      }
       Require(real.Initialize(config), "real CPU model still initializes");
       Require(real.Predict("nihao", 8).value_or("").size() > 0, "normal model prediction is unchanged");
       real.Shutdown();
       Require(capture.Contains(google::GLOG_INFO, "stage=ct2_tokenizer_self_test phase=end"),
               "Release INFO sink records normal completion");
     }
+    Require(CT2Backend::ReleaseShared(), "explicit release drains background model teardown");
+    if (!model_source.empty()) {
+      InferenceBackendConfig config;
+      config.model_path = (temp.path / fs::u8path("模型目录 空格~")).u8string();
+      Require(!CT2Backend::Shared(config), "finalized lifecycle rejects new shared models");
+      CT2Backend::StartShared();
+      auto shared = CT2Backend::Shared(config);
+      Require(shared && shared->Predict("nihao", 8).value_or("").size() > 0,
+              "new lifecycle loads and predicts again");
+      std::weak_ptr<CT2Backend> released = shared;
+      shared.reset();
+      Require(CT2Backend::ReleaseShared(), "second lifecycle drains model teardown");
+      Require(released.expired(), "shared backend does not survive lifecycle finalization");
+    }
+    api->finalize();
+    api->initialize(&traits);
+    CT2Backend::StartShared();
+    Require(CT2Backend::ReleaseShared(), "empty reinitialized lifecycle also finalizes");
     api->finalize();
     fs::remove_all(temp.path);
     Require(!fs::exists(temp.path), "remove isolated fixture directory");

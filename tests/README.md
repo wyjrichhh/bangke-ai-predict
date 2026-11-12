@@ -49,3 +49,11 @@ and its success/error result; other platforms explicitly mark it unsupported. Ex
 ordinary INFO messages may still contain input/context/model paths. They are not
 covered by a claim that all historical logs are sanitized. Customer exception
 capture and release ERROR file output still require the actual Windows build.
+
+The real-model fixture explicitly releases the EXE's shared backend, verifies
+that its weak reference expires, rejects new loads during finalization, and
+reopens the lifecycle for another real prediction. Release joins background
+teardown threads, including their CRT/TLS exit. The Rime DLL has separate plugin
+state; its module-finalize hook must additionally pass an isolated CAPI process
+exit test with an external timeout. The fixture does not prove DLL unload safety
+by testing the EXE's state alone.

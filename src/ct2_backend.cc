@@ -17,6 +17,9 @@
 #include <filesystem>
 #include <optional>
 #include <thread>
+#include <condition_variable>
+#include <new>
+#include <cstdio>
 
 #include <ctranslate2/translator.h>
 #include <ctranslate2/translation.h>
@@ -40,6 +43,92 @@ std::string UnkTokenForVocab(const std::unordered_map<std::string, int>& token_t
 }  // namespace
 
 namespace {
+
+struct PendingRelease {
+  std::unique_ptr<ctranslate2::Translator> translator;
+  PendingRelease* next = nullptr;
+  std::thread worker;
+};
+
+struct SharedBackendState {
+  std::mutex mutex;
+  std::condition_variable released;
+  size_t releasing = 0;
+  size_t allocation_failures = 0;
+  PendingRelease* pending = nullptr;
+  bool finalizing = false;
+  std::string key;
+  std::shared_ptr<CT2Backend> instance;
+};
+
+SharedBackendState& SharedState() {
+  static SharedBackendState state;
+  return state;
+}
+
+void ReleaseError(const char* operation, int code) noexcept {
+  try {
+    LOG(ERROR) << "CT2Backend release failure operation=" << operation << " code=" << code;
+  } catch (...) {
+    std::fputs("CT2Backend release diagnostics unavailable\n", stderr);
+  }
+}
+
+// Keep failed thread launches for a retry outside the session destruction lock.
+void LaunchRelease(PendingRelease* pending) noexcept {
+  auto& state = SharedState();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  pending->next = state.pending;
+  state.pending = pending;
+  ++state.releasing;
+  try {
+    pending->worker = std::thread([pending]() {
+      pending->translator.reset();
+      auto& state = SharedState();
+      std::lock_guard<std::mutex> lock(state.mutex);
+      --state.releasing;
+      state.released.notify_all();
+    });
+  } catch (const std::system_error& error) {
+    ReleaseError("thread", error.code().value());
+    --state.releasing;
+    state.released.notify_all();
+  } catch (...) {
+    ReleaseError("thread", -1);
+    --state.releasing;
+    state.released.notify_all();
+  }
+}
+
+// Joining also waits for the release thread's CRT/TLS teardown, unlike detach.
+bool DrainReleases(bool retry_failed) {
+  auto& state = SharedState();
+  PendingRelease* pending;
+  {
+    std::unique_lock<std::mutex> lock(state.mutex);
+    state.released.wait(lock, [&] { return state.releasing == 0; });
+    pending = state.pending;
+    state.pending = nullptr;
+  }
+  bool complete = true;
+  while (pending) {
+    auto* next = pending->next;
+    pending->next = nullptr;
+    if (pending->worker.joinable()) {
+      pending->worker.join();
+      delete pending;
+    } else if (retry_failed) {
+      LaunchRelease(pending);
+    } else {
+      std::lock_guard<std::mutex> lock(state.mutex);
+      pending->next = state.pending;
+      state.pending = pending;
+      complete = false;
+    }
+    pending = next;
+  }
+  return complete;
+}
 
 // 配置指纹：模型路径、device 与全部解码参数。任一不同就要换一个后端实例——
 // 解码参数是在 Initialize 里解析并固化到实例上的，只换参数不换模型同样要重建。
@@ -71,46 +160,73 @@ std::string ConfigKey(const InferenceBackendConfig& c) {
 }  // namespace
 
 CT2Backend::~CT2Backend() {
-  if (!translator_) {
+  if (!translator_) return;
+  auto* pending = new (std::nothrow) PendingRelease;
+  if (!pending) {
+    // Do not tear down CT2 under a session lock, even under memory pressure.
+    translator_.release();
+    {
+      auto& state = SharedState();
+      std::lock_guard<std::mutex> lock(state.mutex);
+      ++state.allocation_failures;
+    }
+    ReleaseError("allocate", -1);
     return;
   }
-  // 就地销毁 ctranslate2::Translator 要热拆线程池，而池线程退出时的 TLS 析构会
-  // 反向 join 同一个池（环形互等）；若这发生在 librime 销毁会话的锁下——deploy
-  // 就是——输入法会永久卡死。所以挪到独立线程去拆：最坏只赔一个线程，不卡界面。
-  auto* pending =
-      new std::unique_ptr<ctranslate2::Translator>(std::move(translator_));
-  LOG(INFO) << "CT2Backend: releasing old model on a background thread";
-  std::thread([pending]() {
-    delete pending;
-    LOG(INFO) << "CT2Backend: old model released";
-  }).detach();
+  pending->translator = std::move(translator_);
+  LaunchRelease(pending);
+}
+
+void CT2Backend::StartShared() {
+  auto& state = SharedState();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.finalizing = false;
+}
+
+bool CT2Backend::ReleaseShared() {
+  auto& state = SharedState();
+  std::shared_ptr<CT2Backend> retired;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.finalizing = true;
+    state.key.clear();
+    retired = std::move(state.instance);
+  }
+  // The host must have destroyed sessions and joined inference workers first.
+  const bool exclusive = !retired || retired.use_count() == 1;
+  if (!exclusive) ReleaseError("external_references", static_cast<int>(retired.use_count() - 1));
+  retired.reset();
+  DrainReleases(true);
+  const bool drained = DrainReleases(false);
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return exclusive && drained && state.allocation_failures == 0;
 }
 
 std::shared_ptr<CT2Backend> CT2Backend::Shared(
     const InferenceBackendConfig& config) {
-  static std::mutex inst_mutex;
-  static std::shared_ptr<CT2Backend> instance;
-  static std::string instance_key;
+  auto& state = SharedState();
 
   const std::string key = ConfigKey(config);
 
   std::shared_ptr<CT2Backend> result;
   std::shared_ptr<CT2Backend> retired;
+  std::shared_ptr<CT2Backend> backend;
   {
-    std::lock_guard<std::mutex> lock(inst_mutex);
-    if (instance && instance_key == key) {
-      return instance;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.finalizing) return nullptr;
+    if (state.instance && state.key == key) {
+      return state.instance;
     }
 
-    auto backend = std::make_shared<CT2Backend>();
+    backend = std::make_shared<CT2Backend>();
     if (!backend->Initialize(config)) {
       // 保留现有实例：新模型坏掉不该连带把能用的旧模型也弄没。
       return nullptr;
     }
-    retired = std::move(instance);
-    instance = std::move(backend);
-    instance_key = key;
-    result = instance;
+    retired = std::move(state.instance);
+    state.instance = std::move(backend);
+    state.key = key;
+    result = state.instance;
   }
 
   // 出锁再放：旧实例的拆除（后台线程）不该压在换代锁上。
