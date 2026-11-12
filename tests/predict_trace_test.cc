@@ -335,9 +335,9 @@ static int RunTests(const fs::path& model_source) {
             fs::copy_file(entry.path(), target);
         }
         Write(invalid_model / corrupt, "{invalid-json");
-        auto broken = config;
-        broken.model_path = invalid_model.u8string();
-        Require(!CT2Backend::Shared(broken), "post-construction model metadata failure returns without deadlock");
+        auto corrupt_config = config;
+        corrupt_config.model_path = invalid_model.u8string();
+        Require(!CT2Backend::Shared(corrupt_config), "post-construction model metadata failure returns without deadlock");
       }
       Require(real.Initialize(config), "real CPU model still initializes");
       Require(real.Predict("nihao", 8).value_or("").size() > 0, "normal model prediction is unchanged");
