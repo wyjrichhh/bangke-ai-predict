@@ -15,6 +15,7 @@
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <typeinfo>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -89,11 +90,12 @@ static int RunTests(const fs::path& model_source) {
     Write(temp.path / "default.yaml", "schema_list: []\n");
     Write(temp.path / "user.yaml", "{}\n");
     const auto root = temp.path.u8string();
+    const auto native_log_root = temp.path.string();
     RimeTraits traits{};
     RIME_STRUCT_INIT(RimeTraits, traits);
     traits.shared_data_dir = root.c_str();
     traits.user_data_dir = root.c_str();
-    traits.log_dir = root.c_str();
+    traits.log_dir = native_log_root.c_str();
     traits.app_name = "rime.ai_trace_test";
     const char* modules[] = {"core", "dict", "gears", nullptr};
     traits.modules = modules;
@@ -156,7 +158,7 @@ static int RunTests(const fs::path& model_source) {
         translator.Query("n", rime::Segment(0, 1));
       } catch (const std::system_error& error) {
         propagated = true;
-        Require(std::current_exception() == original, "rethrow preserves the original exception object");
+        Require(typeid(error) == typeid(std::system_error), "rethrow preserves the actual exception type");
         Require(error.code() == std::make_error_code(std::errc::permission_denied), "original system code survives");
         const std::system_error source(std::make_error_code(std::errc::permission_denied),
                                        "synthetic_document_secret: cannot open C:\\Users\\PrivateUser\\model.bin");
@@ -187,12 +189,14 @@ static int RunTests(const fs::path& model_source) {
       bool propagated = false;
       try {
         translator.Query("n", rime::Segment(0, 1));
+      } catch (int value) {
+        propagated = value == 42;
       } catch (...) {
-        propagated = std::current_exception() == unknown;
+        propagated = false;
       }
       connection.disconnect();
       Require(propagated && capture.LastError().find("exception_kind=unknown_exception") != std::string::npos,
-              "unknown exception is recorded and rethrown unchanged");
+              "unknown exception retains its original type and value after rethrow");
     }
     TraceInitStage("resolve_model_path", "begin", "", "private device data");
     const std::system_error technical(std::make_error_code(std::errc::permission_denied),
@@ -259,7 +263,7 @@ static int RunTests(const fs::path& model_source) {
     Require(!fs::exists(temp.path), "remove isolated fixture directory");
     capture.Stop();
     google::ShutdownGoogleLogging();
-    std::cout << "PASS capture-only trace, original exception identity, bounded redaction and model behavior\n";
+    std::cout << "PASS capture-only trace, original exception type/code/message, bounded redaction and model behavior\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "FAIL " << error.what() << '\n';

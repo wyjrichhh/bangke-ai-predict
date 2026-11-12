@@ -22,7 +22,7 @@ promise about Windows output layouts.
 
 The Release test attaches an in-memory `google::LogSink`, verifies ERROR stage,
 exception kind, numeric system code/category and JSON ID, bounded/control-free
-path-redacted messages, and original exception identity/what/code after rethrow.
+path-redacted messages, and original exception type/what/code after rethrow.
 It calls Query twice to ensure capture adds no failure latch or fail-open state
 cleanup. CT2 keeps its original false return for a broken model.
 
