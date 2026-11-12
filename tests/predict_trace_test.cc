@@ -128,7 +128,7 @@ static int RunTests(const fs::path& model_source) {
             "what is a single control-free line");
 
     std::unique_ptr<rime::Engine> engine(rime::Engine::Create());
-    engine->schema()->config()->SetBool("ai_predict/enabled", true);
+    engine->schema()->config()->SetString("ai_predict/enabled", "true");
     engine->schema()->config()->SetString("ai_predict/model_path", "missing-model");
     engine->schema()->config()->SetString("ai_predict/device", "cpu");
     auto* context = engine->context();
@@ -137,7 +137,7 @@ static int RunTests(const fs::path& model_source) {
         std::make_error_code(std::errc::permission_denied),
         "synthetic_document_secret: cannot open C:\\Users\\PrivateUser\\model.bin"));
     std::unique_ptr<rime::Engine> nested_engine(rime::Engine::Create());
-    nested_engine->schema()->config()->SetBool("ai_predict/enabled", true);
+    nested_engine->schema()->config()->SetString("ai_predict/enabled", "true");
     nested_engine->schema()->config()->SetString("ai_predict/model_path", "");
     rime::predict::PredictTranslator nested(rime::Ticket(nested_engine.get(), "ai_predict"));
     const auto inject = [&](rime::Context*, const std::string& property) {

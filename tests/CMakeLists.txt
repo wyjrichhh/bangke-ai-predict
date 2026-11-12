@@ -21,6 +21,18 @@ add_executable(predict_trace_test predict_trace_test.cc $<TARGET_OBJECTS:rime-ai
 target_include_directories(predict_trace_test PRIVATE ../src)
 target_include_directories(predict_trace_test PRIVATE "${CTRANSLATE2_ROOT}/include")
 target_link_libraries(predict_trace_test PRIVATE ${plugin_deps} "${AI_TEST_GLOG_LIBRARY}")
+if(WIN32)
+  # These helper implementations are not exported by the matching Rime DLL.
+  target_sources(predict_trace_test PRIVATE
+    "${RIME_ROOT}/src/rime/translation.cc"
+    "${RIME_ROOT}/src/rime/candidate.cc"
+    "${RIME_ROOT}/src/rime/gear/filter_commons.cc")
+  if(MSVC)
+    set_source_files_properties("${RIME_ROOT}/src/rime/translation.cc"
+      PROPERTIES COMPILE_OPTIONS "/URIME_IMPORTS")
+  endif()
+  target_link_libraries(predict_trace_test PRIVATE dbghelp)
+endif()
 if(MSVC)
   target_compile_options(predict_trace_test PRIVATE /W4 /utf-8)
   target_compile_options(rime-ai-predict-objs PRIVATE /utf-8)
