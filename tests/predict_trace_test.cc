@@ -106,7 +106,7 @@ static rime::Config* Configuration(const fs::path& model, bool ai_only = false) 
   config->SetItem("engine/translators", List({"test_predict", "echo_translator"}));
   config->SetItem("engine/filters", List({"test_predict_filter"}));
   config->SetString("speller/alphabet", "abcdefghijklmnopqrstuvwxyz");
-  config->SetString("ai_predict/model_path", model.u8string());
+  config->SetString("ai_predict/model_path", model.u8string().c_str());
   config->SetString("ai_predict/enabled", "true");
   config->SetString("ai_predict/device", "cpu");
   config->SetString("ai_predict/ai_only", ai_only ? "true" : "false");
