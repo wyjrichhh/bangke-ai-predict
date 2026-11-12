@@ -5,6 +5,7 @@
 
 #include "context_builder.h"
 #include "ct2_backend.h"
+#include "init_trace.h"
 
 #include <glog/logging.h>
 
@@ -218,152 +219,186 @@ std::filesystem::path PredictTranslator::ResolveModelPath() const {
 }
 
 bool PredictTranslator::EnsureEngine() {
+  TraceInitStage("ensure_engine", "begin", model_path_raw_, device_);
   if (!enabled_) {
+    TraceInitStage("ensure_engine", "disabled", model_path_raw_, device_);
     return false;
   }
 
+  TraceInitStage("resolve_model_path", "begin", model_path_raw_, device_);
   auto path = ResolveModelPath();
+  TraceInitStage("resolve_model_path", "end", model_path_raw_, device_);
 
   // 换了模型（路径变了）就不该继续用旧引擎，也不该被上一次的失败锁死：
   // 两个 latch 都归零，让下面的流程重新走一遍。
+  TraceInitStage("path_cache_compare", "begin", model_path_raw_, device_);
   if (path.string() != engine_path_) {
     init_attempted_ = false;
     init_ok_ = false;
     prediction_.reset();
   }
 
+  TraceInitStage("path_cache_compare", "end", model_path_raw_, device_);
   if (init_ok_ && prediction_) {
+    TraceInitStage("ensure_engine", "cached_ready", model_path_raw_, device_);
     return true;
   }
   if (init_attempted_ && !init_ok_) {
+    TraceInitStage("ensure_engine", "previous_failure", model_path_raw_, device_);
     return false;
   }
   init_attempted_ = true;
+  TraceInitStage("path_cache_store", "begin", model_path_raw_, device_);
   engine_path_ = path.string();
+  TraceInitStage("path_cache_store", "end", model_path_raw_, device_);
   if (path.empty()) {
     LOG(ERROR) << "ai_predict_translator: ai_predict/model_path is not set";
     return false;
   }
+  TraceInitStage("vocabulary_exists", "begin", model_path_raw_, device_);
   if (!std::filesystem::exists(path / "shared_vocabulary.json")) {
+    TraceInitStage("vocabulary_failure_log", "failed", model_path_raw_, device_);
     LOG(ERROR) << "ai_predict_translator: model directory missing shared_vocabulary.json: "
                << path;
     return false;
   }
+  TraceInitStage("vocabulary_exists", "end", model_path_raw_, device_);
   InferenceBackendConfig cfg;
+  TraceInitStage("backend_config_path", "begin", model_path_raw_, device_);
   cfg.model_path = path.string();
+  TraceInitStage("backend_config_path", "end", model_path_raw_, device_);
   cfg.device = device_;
   cfg.decode = decode_;
+  TraceInitStage("backend_shared", "begin", model_path_raw_, device_);
   auto backend = CT2Backend::Shared(cfg);
+  TraceInitStage("backend_shared", backend ? "end" : "failed", model_path_raw_, device_);
   if (!backend) {
     LOG(ERROR) << "ai_predict_translator: failed to initialize CT2 backend";
     return false;
   }
+  TraceInitStage("prediction_engine", "begin", model_path_raw_, device_);
   prediction_ =
       std::make_unique<PredictionEngine>(engine_, backend, engine_opt_);
+  TraceInitStage("prediction_engine", "end", model_path_raw_, device_);
   init_ok_ = true;
+  TraceInitStage("ready_log", "begin", model_path_raw_, device_);
   LOG(INFO) << "ai_predict_translator: ready, model=" << path;
+  TraceInitStage("ensure_engine", "end", model_path_raw_, device_);
   return true;
 }
 
 an<Translation> PredictTranslator::Query(const string& input,
                                          const Segment& segment) {
-  LOG(INFO) << "ai_predict_translator: Query input='" << input << "' segment=["
-            << segment.start << "," << segment.end << ")";
-  // pending 只表示「刚 Schedule 完、结果还没落进缓存」。每趟 Query 先清掉，只有真的
-  // 调度了才重新置上：EnsureEngine/Build/is_active_segment 这些提前返回都不代表有推理
-  // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
-  PublishPendingProperty(engine_, false);
-  if (!EnsureEngine()) {
-    LOG(INFO) << "ai_predict_translator: Query early-return (engine not ready)";
-    return nullptr;
-  }
+  InitTraceScope trace_scope;
+  try {
+    TraceInitStage("query", "begin", model_path_raw_, device_);
+    LOG(INFO) << "ai_predict_translator: Query input='" << input << "' segment=["
+              << segment.start << "," << segment.end << ")";
+    // pending 只表示「刚 Schedule 完、结果还没落进缓存」。每趟 Query 先清掉，只有真的
+    // 调度了才重新置上：EnsureEngine/Build/is_active_segment 这些提前返回都不代表有推理
+    // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
+    PublishPendingProperty(engine_, false);
+    if (!EnsureEngine()) {
+      LOG(INFO) << "ai_predict_translator: Query early-return (engine not ready)";
+      return nullptr;
+    }
 
-  // 推理要的是**用户打出来的完整输入**，不是当前这一段。
-  //
-  // composition 会被分段切开：前几个音节能翻成词、后面那段翻不出来（打错了、多了字母）
-  // 时，段会变成 [29,99) 这样——参数 input 只是那一段的尾巴，模型拿不到前半句，
-  // 于是只能给出半截答案（日志实测：input='ufashihen...' → 'ufa是很好用的…'）。
-  // 已上屏的中文不在 input 里（它走 commit_history 进 window），所以这里取全串不会
-  // 重复。段的 start/end 仍然只用于候选跨度，不受影响。
-  string prompt_input = input;
-  if (engine_ && engine_->context()) {
-    Context* ctx = engine_->context();
-    const string& full = ctx->input();
-    const size_t caret = ctx->caret_pos();
-    prompt_input = caret < full.size() ? full.substr(0, caret) : full;
-  }
-  auto built = ContextBuilder::Build(engine_, prompt_input, ctx_opt_);
-  if (!built) {
-    LOG(INFO) << "ai_predict_translator: Query no context built (input too short / no commit history)";
-    // 失败路径不清缓存：缓存按 window_text|prompt 作 key，旧结果只会在同一输入下
-    // 命中（正确的复用）；在此清缓存会在前导非拼音段（大写 raw/标点/符号）先于拼音段
-    // 被翻译时，反复冲掉拼音段刚算好的结果，造成刷新死循环。
-    PublishAITextProperty(engine_, "");
-    return nullptr;
-  }
-  LOG(INFO) << "ai_predict_translator: built context"
-            << " mode=" << (built->windowed ? "windowed" : "direct")
-            << " window_source="
-            << (built->window_from_frontend ? "frontend" : "history")
-            << " window_text='" << built->window_text << "'"
-            // Only present when the window came from the frontend: what the
-            // history path would have said instead. Lets the two be compared
-            // offline -- if they disagree often, the frontend read is suspect.
-            << (built->window_from_frontend
-                    ? " history_window='" + built->history_window_text + "'"
-                    : "")
-            << " effective_prompt='" << built->effective_prompt << "'"
-            << " cache_key='" << built->cache_key << "'";
-
-  if (auto raw = prediction_->GetCachedResult(built->cache_key)) {
-    if (!raw->empty()) {
-      const string display = ExtractDisplayText(*raw, filter_punctuation_);
-      // A cached result is deterministic: if its display text is unusable
-      // (empty after punctuation strip, or too few Hanzi), re-scheduling would
-      // recompute the SAME unusable output and refresh again -- a busy loop. So
-      // on a HIT we either surface the candidate or give up for this key; we
-      // never fall through to Schedule().
-      if (!display.empty() && IsDisplayableCandidate(display) &&
-          CountHan(display) >= min_hanzi_) {
-        LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
-        PublishAITextProperty(engine_, display);
-        auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
-                                         display, "AI");
-        return New<AIPredictTranslation>(cand);
-      }
-      LOG(INFO) << "ai_predict_translator: cache HIT suppressed (unusable display)"
-                << " raw='" << *raw << "'";
+    TraceInitStage("query", "continue", model_path_raw_, device_);
+    // 推理要的是**用户打出来的完整输入**，不是当前这一段。
+    //
+    // composition 会被分段切开：前几个音节能翻成词、后面那段翻不出来（打错了、多了字母）
+    // 时，段会变成 [29,99) 这样——参数 input 只是那一段的尾巴，模型拿不到前半句，
+    // 于是只能给出半截答案（日志实测：input='ufashihen...' → 'ufa是很好用的…'）。
+    // 已上屏的中文不在 input 里（它走 commit_history 进 window），所以这里取全串不会
+    // 重复。段的 start/end 仍然只用于候选跨度，不受影响。
+    string prompt_input = input;
+    if (engine_ && engine_->context()) {
+      Context* ctx = engine_->context();
+      const string& full = ctx->input();
+      const size_t caret = ctx->caret_pos();
+      prompt_input = caret < full.size() ? full.substr(0, caret) : full;
+    }
+    auto built = ContextBuilder::Build(engine_, prompt_input, ctx_opt_);
+    if (!built) {
+      LOG(INFO) << "ai_predict_translator: Query no context built (input too short / no commit history)";
+      // 失败路径不清缓存：缓存按 window_text|prompt 作 key，旧结果只会在同一输入下
+      // 命中（正确的复用）；在此清缓存会在前导非拼音段（大写 raw/标点/符号）先于拼音段
+      // 被翻译时，反复冲掉拼音段刚算好的结果，造成刷新死循环。
       PublishAITextProperty(engine_, "");
       return nullptr;
     }
-  }
+    LOG(INFO) << "ai_predict_translator: built context"
+              << " mode=" << (built->windowed ? "windowed" : "direct")
+              << " window_source="
+              << (built->window_from_frontend ? "frontend" : "history")
+              << " window_text='" << built->window_text << "'"
+              // Only present when the window came from the frontend: what the
+              // history path would have said instead. Lets the two be compared
+              // offline -- if they disagree often, the frontend read is suspect.
+              << (built->window_from_frontend
+                      ? " history_window='" + built->history_window_text + "'"
+                      : "")
+              << " effective_prompt='" << built->effective_prompt << "'"
+              << " cache_key='" << built->cache_key << "'";
 
-  LOG(INFO) << "ai_predict_translator: cache MISS, scheduling inference";
-  PublishAITextProperty(engine_, "");
-  // 只有「当前段」（最后一个 segment）才调度推理。composition 会被大写 raw 段切成
-  // 多个拼音段, 若每个段都各自调度, 单槽 cache 会被多段轮流覆盖, 形成「A 命中→B 未
-  // 命中→调度 B→B 命中→A 未命中」的乒乓, 候选在词库与 AI 之间来回闪烁。前面的段
-  // 前端不读它的 menu, 调度了也白调度, 还抢 cache。
-  bool is_active_segment = false;
-  bool user_navigated = false;
-  if (engine_ && engine_->context()) {
-    const Composition& comp = engine_->context()->composition();
-    is_active_segment =
-        !comp.empty() && comp.back().start == segment.start &&
-        comp.back().end == segment.end;
-    user_navigated = !comp.empty() && comp.back().selected_index > 0;
-  }
-  if (!is_active_segment) {
+    if (auto raw = prediction_->GetCachedResult(built->cache_key)) {
+      if (!raw->empty()) {
+        const string display = ExtractDisplayText(*raw, filter_punctuation_);
+        // A cached result is deterministic: if its display text is unusable
+        // (empty after punctuation strip, or too few Hanzi), re-scheduling would
+        // recompute the SAME unusable output and refresh again -- a busy loop. So
+        // on a HIT we either surface the candidate or give up for this key; we
+        // never fall through to Schedule().
+        if (!display.empty() && IsDisplayableCandidate(display) &&
+            CountHan(display) >= min_hanzi_) {
+          LOG(INFO) << "ai_predict_translator: cache HIT display='" << display << "'";
+          PublishAITextProperty(engine_, display);
+          auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
+                                           display, "AI");
+          return New<AIPredictTranslation>(cand);
+        }
+        LOG(INFO) << "ai_predict_translator: cache HIT suppressed (unusable display)"
+                  << " raw='" << *raw << "'";
+        PublishAITextProperty(engine_, "");
+        return nullptr;
+      }
+    }
+
+    LOG(INFO) << "ai_predict_translator: cache MISS, scheduling inference";
+    PublishAITextProperty(engine_, "");
+    // 只有「当前段」（最后一个 segment）才调度推理。composition 会被大写 raw 段切成
+    // 多个拼音段, 若每个段都各自调度, 单槽 cache 会被多段轮流覆盖, 形成「A 命中→B 未
+    // 命中→调度 B→B 命中→A 未命中」的乒乓, 候选在词库与 AI 之间来回闪烁。前面的段
+    // 前端不读它的 menu, 调度了也白调度, 还抢 cache。
+    bool is_active_segment = false;
+    bool user_navigated = false;
+    if (engine_ && engine_->context()) {
+      const Composition& comp = engine_->context()->composition();
+      is_active_segment =
+          !comp.empty() && comp.back().start == segment.start &&
+          comp.back().end == segment.end;
+      user_navigated = !comp.empty() && comp.back().selected_index > 0;
+    }
+    if (!is_active_segment) {
+      return nullptr;
+    }
+    prediction_->Schedule(*built);
+    // 置上 pending 就是请前端重排一次。用户已经翻页或移动高亮时不能置：重排会把
+    // selected_index 归零，表现是候选栏自己跳回第一页。仍调度——缓存填上，下次按键
+    // 直接命中，只是这一轮不主动浮现。
+    if (!user_navigated) {
+      PublishPendingProperty(engine_, true);
+    }
     return nullptr;
+
+  } catch (const std::exception& error) {
+    TraceInitException(error, model_path_raw_, device_);
+    throw;
+  } catch (...) {
+    TraceInitFailure(init_trace_stage, "unknown_exception", "none", 0, 0,
+                     "unknown exception", model_path_raw_, device_);
+    throw;
   }
-  prediction_->Schedule(*built);
-  // 置上 pending 就是请前端重排一次。用户已经翻页或移动高亮时不能置：重排会把
-  // selected_index 归零，表现是候选栏自己跳回第一页。仍调度——缓存填上，下次按键
-  // 直接命中，只是这一轮不主动浮现。
-  if (!user_navigated) {
-    PublishPendingProperty(engine_, true);
-  }
-  return nullptr;
 }
 
 }  // namespace predict

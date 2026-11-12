@@ -5,6 +5,7 @@
 // Distributed under the BSD License
 
 #include "ct2_backend.h"
+#include "init_trace.h"
 
 #include <glog/logging.h>
 
@@ -117,6 +118,7 @@ std::shared_ptr<CT2Backend> CT2Backend::Shared(
 }
 
 bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
+  InitTraceScope trace_scope;
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (initialized_.load(std::memory_order_acquire)) {
@@ -132,7 +134,9 @@ bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
 
   try {
     // 必须在建 Translator 之前：compute_type 是构造参数
+    TraceInitStage("ct2_decode_params", "begin", model_path, device);
     ResolveDecodeParams(model_path, config.decode);
+    TraceInitStage("ct2_decode_params", "end", model_path, device);
 
     ctranslate2::Device ct2_device = ctranslate2::Device::CPU;
     if (device.find("cuda") != std::string::npos ||
@@ -141,46 +145,59 @@ bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
       LOG(INFO) << "CT2Backend using CUDA";
     }
 
+    TraceInitStage("ct2_compute_type", "begin", model_path, device);
     ctranslate2::ComputeType compute_type =
         ctranslate2::str_to_compute_type(compute_type_);
 
+    TraceInitStage("ct2_compute_type", "end", model_path, device);
     ctranslate2::ReplicaPoolConfig pool_config;
     pool_config.num_threads_per_replica =
         static_cast<size_t>(kCt2DefaultIntraThreads);
 
+    TraceInitStage("ct2_construct_translator", "begin", model_path, device);
     translator_ = std::make_unique<ctranslate2::Translator>(
         model_path, ct2_device, compute_type, std::vector<int>{0}, false,
         pool_config);
 
+    TraceInitStage("ct2_construct_translator", "end", model_path, device);
     if (!translator_) {
       LOG(ERROR) << "CT2Backend failed to create translator";
       return false;
     }
 
     const std::string vocab_path = model_path + "/shared_vocabulary.json";
+    TraceInitStage("ct2_vocabulary", "begin", model_path, device);
     if (!LoadSharedVocabulary(vocab_path)) {
+      TraceInitStage("ct2_vocabulary", "failed", model_path, device);
       LOG(ERROR) << "CT2Backend failed to load shared_vocabulary.json";
       translator_.reset();
       return false;
     }
 
+    TraceInitStage("ct2_vocabulary", "end", model_path, device);
     unk_token_ = UnkTokenForVocab(token_to_id_);
 
     std::string tokenizer_error;
+    TraceInitStage("ct2_tokenizer", "begin", model_path, device);
     tokenizer_ = Tokenizer::Create(model_path + "/tokenizer.json", token_to_id_,
                                    unk_token_, &tokenizer_error);
     if (!tokenizer_) {
+      TraceInitStage("ct2_tokenizer", "failed", model_path, device);
       LOG(ERROR) << "CT2Backend: " << tokenizer_error
                  << "; AI prediction stays off instead of emitting [UNK].";
       translator_.reset();
       return false;
     }
 
+    TraceInitStage("ct2_tokenizer", "end", model_path, device);
+    TraceInitStage("ct2_tokenizer_self_test", "begin", model_path, device);
     if (!VerifyTokenizerSelfTest()) {
+      TraceInitStage("ct2_tokenizer_self_test", "failed", model_path, device);
       translator_.reset();
       return false;
     }
 
+    TraceInitStage("ct2_tokenizer_self_test", "end", model_path, device);
     LOG(INFO) << "CT2Backend tokenizer: kind=" << tokenizer_->Kind()
               << " vocab=" << token_to_id_.size();
 
@@ -188,7 +205,7 @@ bool CT2Backend::Initialize(const InferenceBackendConfig& config) {
     return true;
 
   } catch (const std::exception& e) {
-    LOG(ERROR) << "CT2Backend initialize: " << e.what();
+    TraceInitException(e, model_path, device);
     translator_.reset();
     return false;
   }
