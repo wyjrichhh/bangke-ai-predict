@@ -426,7 +426,7 @@ std::optional<std::string> CT2Backend::Predict(
     return result;
 
   } catch (const std::exception& e) {
-    TraceInitScope trace_scope;
+    InitTraceScope trace_scope;
     TraceInitStage("prediction", "failed", "", device_);
     TraceInitException(e, "", device_);
     return std::nullopt;

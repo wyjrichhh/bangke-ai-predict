@@ -407,7 +407,7 @@ class UnigramTokenizer : public Tokenizer {
         i += Utf8Length(static_cast<unsigned char>(kv.first[i]));
         ++chars;
       }
-      max_chars_ = std::max(max_chars_, chars);
+      max_chars_ = (std::max)(max_chars_, chars);
     }
   }
 
