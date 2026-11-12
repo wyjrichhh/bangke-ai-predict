@@ -1,4 +1,4 @@
-# Capture-only initialization trace tests
+# Unicode model initialization and fail-open tests
 
 This target compiles the diagnostic plugin sources and reuses compatible Rime,
 Boost, static glog and CT2 dependencies. It does not rebuild Rime and does not
@@ -22,9 +22,10 @@ promise about Windows output layouts.
 
 The Release test attaches an in-memory `google::LogSink`, verifies ERROR stage,
 exception kind, numeric system code/category and JSON ID, bounded/control-free
-path-redacted messages, and original exception type/what/code after rethrow.
-It calls Query twice to ensure capture adds no failure latch or fail-open state
-cleanup. CT2 keeps its original false return for a broken model.
+path-redacted messages. Query failures return no AI translation and clear pending
+and AI text independently, allowing the subsequent echo translator to produce a
+candidate (or no candidate in AI-only mode). This checks the translator chain,
+not a complete Chinese dictionary or frontend UI.
 
 On Windows this fixture directs the Rime DLL's private glog to stderr because
 its log handles live until process exit; the EXE's in-memory Capture sink still
@@ -32,11 +33,12 @@ checks trace records. Actual Windows ERROR file persistence is verified by the
 separate CAPI producer and installation acceptance, not by this fixture.
 
 Optionally set `-DBANGKE_AI_TEST_MODEL_DIR=<existing-known-working-model>` to add
-`predict_trace_model`, which reads the existing model without copying or changing
-it and verifies CPU initialization and one prediction plus completion traces.
-This diagnostic branch intentionally retains the original path handling: a
-previously broken Windows Unicode model path may remain broken and should be
-investigated using the captured exception rather than expected to pass.
+`predict_trace_model`, which creates a Chinese/space/~ model directory in its
+isolated temporary directory, hard-links model.bin and copies small metadata,
+then verifies CPU initialization and one prediction. The source model is never
+modified. Source and temporary directory must be on the same filesystem for the
+hard link. Windows acceptance must also exercise the installed input method in
+the existing Chinese account and its real Chinese dictionary.
 
 Only new `ai_predict_init` records use the bounded redaction helper. Technical
 `what` messages are retained only for the fixed model-initialization stage

@@ -25,7 +25,9 @@ class PredictTranslator : public Translator {
   an<Translation> Query(const string& input, const Segment& segment) override;
 
  private:
+  friend struct PredictInitTest;
   bool EnsureEngine();
+  void ClearFailedPrediction() noexcept;
   std::filesystem::path ResolveModelPath() const;
   void LoadOptions();
 

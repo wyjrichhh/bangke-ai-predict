@@ -27,6 +27,7 @@ struct DecodeParams {
 };
 
 struct InferenceBackendConfig {
+  // UTF-8 encoded model directory.
   std::string model_path;
   std::string device = "cpu";
   DecodeParams decode;

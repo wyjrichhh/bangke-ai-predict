@@ -9,6 +9,8 @@
 
 #include <glog/logging.h>
 
+#include <cstdio>
+
 #include <rime/context.h>
 #include <rime/engine.h>
 #include <rime/candidate.h>
@@ -211,7 +213,7 @@ std::filesystem::path PredictTranslator::ResolveModelPath() const {
   if (model_path_raw_.empty()) {
     return {};
   }
-  std::filesystem::path p(model_path_raw_);
+  std::filesystem::path p = std::filesystem::u8path(model_path_raw_);
   if (p.is_absolute()) {
     return p;
   }
@@ -232,7 +234,7 @@ bool PredictTranslator::EnsureEngine() {
   // 换了模型（路径变了）就不该继续用旧引擎，也不该被上一次的失败锁死：
   // 两个 latch 都归零，让下面的流程重新走一遍。
   TraceInitStage("path_cache_compare", "begin", model_path_raw_, device_);
-  if (path.string() != engine_path_) {
+  if (path.u8string() != engine_path_) {
     init_attempted_ = false;
     init_ok_ = false;
     prediction_.reset();
@@ -249,7 +251,7 @@ bool PredictTranslator::EnsureEngine() {
   }
   init_attempted_ = true;
   TraceInitStage("path_cache_store", "begin", model_path_raw_, device_);
-  engine_path_ = path.string();
+  engine_path_ = path.u8string();
   TraceInitStage("path_cache_store", "end", model_path_raw_, device_);
   if (path.empty()) {
     LOG(ERROR) << "ai_predict_translator: ai_predict/model_path is not set";
@@ -259,13 +261,13 @@ bool PredictTranslator::EnsureEngine() {
   if (!std::filesystem::exists(path / "shared_vocabulary.json")) {
     TraceInitStage("vocabulary_failure_log", "failed", model_path_raw_, device_);
     LOG(ERROR) << "ai_predict_translator: model directory missing shared_vocabulary.json: "
-               << path;
+               << path.u8string();
     return false;
   }
   TraceInitStage("vocabulary_exists", "end", model_path_raw_, device_);
   InferenceBackendConfig cfg;
   TraceInitStage("backend_config_path", "begin", model_path_raw_, device_);
-  cfg.model_path = path.string();
+  cfg.model_path = path.u8string();
   TraceInitStage("backend_config_path", "end", model_path_raw_, device_);
   cfg.device = device_;
   cfg.decode = decode_;
@@ -282,7 +284,7 @@ bool PredictTranslator::EnsureEngine() {
   TraceInitStage("prediction_engine", "end", model_path_raw_, device_);
   init_ok_ = true;
   TraceInitStage("ready_log", "begin", model_path_raw_, device_);
-  LOG(INFO) << "ai_predict_translator: ready, model=" << path;
+  LOG(INFO) << "ai_predict_translator: ready, model=" << path.u8string();
   TraceInitStage("ensure_engine", "end", model_path_raw_, device_);
   return true;
 }
@@ -299,6 +301,7 @@ an<Translation> PredictTranslator::Query(const string& input,
     // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
     PublishPendingProperty(engine_, false);
     if (!EnsureEngine()) {
+      ClearFailedPrediction();
       LOG(INFO) << "ai_predict_translator: Query early-return (engine not ready)";
       return nullptr;
     }
@@ -393,11 +396,27 @@ an<Translation> PredictTranslator::Query(const string& input,
 
   } catch (const std::exception& error) {
     TraceInitException(error, model_path_raw_, device_);
-    throw;
+    ClearFailedPrediction();
+    return nullptr;
   } catch (...) {
     TraceInitFailure(init_trace_stage, "unknown_exception", "none", 0, 0,
                      "unknown exception", model_path_raw_, device_);
-    throw;
+    ClearFailedPrediction();
+    return nullptr;
+  }
+}
+
+void PredictTranslator::ClearFailedPrediction() noexcept {
+  // Notifications may themselves throw; clear each property independently.
+  unsigned cleanup_errors = 0;
+  try { PublishPendingProperty(engine_, false); } catch (...) { ++cleanup_errors; }
+  try { PublishAITextProperty(engine_, ""); } catch (...) { ++cleanup_errors; }
+  if (cleanup_errors) {
+    try {
+      LOG(ERROR) << "ai_predict_translator: cleanup_notification_errors=" << cleanup_errors;
+    } catch (...) {
+      std::fputs("ai_predict_translator: cleanup diagnostics unavailable\n", stderr);
+    }
   }
 }
 

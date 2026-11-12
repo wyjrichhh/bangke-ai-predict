@@ -1,8 +1,13 @@
 #include "predict_translator.h"
 #include "ct2_backend.h"
+#include "predict_filter.h"
 #include "init_trace.h"
 
 #include <rime_api.h>
+#include <rime/component.h>
+#include <rime/key_event.h>
+#include <rime/menu.h>
+#include <rime/registry.h>
 #include <rime/config.h>
 #include <rime/context.h>
 #include <rime/engine.h>
@@ -20,6 +25,12 @@
 
 namespace fs = std::filesystem;
 using namespace rime::predict;
+
+namespace rime::predict {
+struct PredictInitTest {
+  static bool Ensure(PredictTranslator& translator) { return translator.EnsureEngine(); }
+};
+}  // namespace rime::predict
 
 static void Require(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
@@ -79,6 +90,27 @@ static void Write(const fs::path& path, const std::string& content) {
   stream << content;
   stream.close();
   Require(!stream.fail(), "write isolated fixture");
+}
+
+static rime::an<rime::ConfigList> List(std::initializer_list<const char*> values) {
+  auto result = rime::New<rime::ConfigList>();
+  for (auto value : values) result->Append(rime::New<rime::ConfigValue>(value));
+  return result;
+}
+
+static rime::Config* Configuration(const fs::path& model, bool ai_only = false) {
+  auto config = new rime::Config;
+  config->SetString("schema/name", "init-test");
+  config->SetItem("engine/processors", List({"speller"}));
+  config->SetItem("engine/segmentors", List({"abc_segmentor"}));
+  config->SetItem("engine/translators", List({"test_predict", "echo_translator"}));
+  config->SetItem("engine/filters", List({"test_predict_filter"}));
+  config->SetString("speller/alphabet", "abcdefghijklmnopqrstuvwxyz");
+  config->SetString("ai_predict/model_path", model.u8string());
+  config->SetString("ai_predict/enabled", "true");
+  config->SetString("ai_predict/device", "cpu");
+  config->SetString("ai_predict/ai_only", ai_only ? "true" : "false");
+  return config;
 }
 
 static int RunTests(const fs::path& model_source) {
@@ -157,22 +189,13 @@ static int RunTests(const fs::path& model_source) {
       context->set_property("ai_predict/pending", "1");
       context->set_property("ai_predict/text", "stale");
       auto connection = context->property_update_notifier().connect(inject);
-      bool propagated = false;
       const char* outer_stage = init_trace_stage;
-      try {
-        translator.Query("n", rime::Segment(0, 1));
-      } catch (const std::system_error& error) {
-        propagated = true;
-        Require(typeid(error) == typeid(std::system_error), "rethrow preserves the actual exception type");
-        Require(error.code() == std::make_error_code(std::errc::permission_denied), "original system code survives");
-        const std::system_error source(std::make_error_code(std::errc::permission_denied),
-                                       "synthetic_document_secret: cannot open C:\\Users\\PrivateUser\\model.bin");
-        Require(std::string(error.what()) == source.what(), "original what survives unchanged");
-      }
+      Require(!translator.Query("n", rime::Segment(0, 1)), "failed AI returns no translation");
       connection.disconnect();
       Require(init_trace_stage == outer_stage, "Query restores its caller stage after an exception");
-      Require(propagated && context->get_property("ai_predict/text") == "stale",
-              "capture does not fail open or clear original AI state");
+      Require(context->get_property("ai_predict/pending").empty() &&
+              context->get_property("ai_predict/text").empty(),
+              "AI failure clears both properties despite a throwing notification");
       const auto error = capture.LastError();
       Require(error.find("stage=query phase=failed") != std::string::npos &&
               error.find("exception_kind=system_error") != std::string::npos &&
@@ -191,17 +214,10 @@ static int RunTests(const fs::path& model_source) {
           [&](rime::Context*, const std::string& property) {
             if (property == "ai_predict/pending") std::rethrow_exception(unknown);
           });
-      bool propagated = false;
-      try {
-        translator.Query("n", rime::Segment(0, 1));
-      } catch (int value) {
-        propagated = value == 42;
-      } catch (...) {
-        propagated = false;
-      }
+      Require(!translator.Query("n", rime::Segment(0, 1)), "unknown AI exceptions fail open");
       connection.disconnect();
-      Require(propagated && capture.LastError().find("exception_kind=unknown_exception") != std::string::npos,
-              "unknown exception retains its original type and value after rethrow");
+      Require(capture.LastError().find("exception_kind=unknown_exception") != std::string::npos,
+              "unknown exceptions remain diagnosed");
     }
     TraceInitStage("resolve_model_path", "begin", "", "private device data");
     const std::system_error technical(std::make_error_code(std::errc::permission_denied),
@@ -253,10 +269,58 @@ static int RunTests(const fs::path& model_source) {
     Require(capture.LastError().find("exception_kind=bad_alloc") != std::string::npos,
             "allocation failures have a distinct kind");
 
+    rime::Registry::instance().Register("test_predict", new rime::Component<PredictTranslator>);
+    rime::Registry::instance().Register("test_predict_filter", new rime::Component<PredictFilter>);
+    for (bool only : {false, true}) {
+      std::unique_ptr<rime::Engine> fallback(rime::Engine::Create());
+      fallback->ApplySchema(new rime::Schema("fail-open-test", Configuration(temp.path, only)));
+      auto* ctx = fallback->context();
+      ctx->set_property("ai_predict/pending", "1");
+      ctx->set_property("ai_predict/text", "stale");
+      auto connection = ctx->property_update_notifier().connect(
+          [](rime::Context*, const std::string& property) {
+            if (property == "ai_predict/pending" || property == "ai_predict/text")
+              throw std::system_error(std::make_error_code(std::errc::illegal_byte_sequence));
+          });
+      Require(fallback->ProcessKey(rime::KeyEvent('n', 0)), "AI exception does not abort input");
+      connection.disconnect();
+      Require(ctx->get_property("ai_predict/pending").empty() && ctx->get_property("ai_predict/text").empty(),
+              "AI exception clears both stale properties");
+      auto menu = ctx->composition().back().menu;
+      Require(menu && menu->Prepare(1) == (only ? 0u : 1u),
+              "ordinary translator runs after AI exception while AI-only remains respected");
+    }
+
+    {
+      std::unique_ptr<rime::Engine> fallback(rime::Engine::Create());
+      fallback->ApplySchema(new rime::Schema("missing-model-test", Configuration(temp.path)));
+      auto* ctx = fallback->context();
+      ctx->set_property("ai_predict/pending", "1");
+      ctx->set_property("ai_predict/text", "stale");
+      Require(fallback->ProcessKey(rime::KeyEvent('n', 0)), "normal initialization failure does not abort input");
+      Require(ctx->get_property("ai_predict/pending").empty() && ctx->get_property("ai_predict/text").empty(),
+              "normal initialization failure clears stale AI state");
+      auto menu = ctx->composition().back().menu;
+      Require(menu && menu->Prepare(1) == 1u, "ordinary candidate survives initialization returning false");
+    }
+
     if (!model_source.empty()) {
       CT2Backend real;
       InferenceBackendConfig config;
-      config.model_path = model_source.u8string();
+      const auto unicode_model = temp.path / fs::u8path("模型目录 空格~");
+      fs::create_directories(unicode_model);
+      for (const auto& entry : fs::directory_iterator(model_source)) {
+        if (!entry.is_regular_file()) continue;
+        const auto target = unicode_model / entry.path().filename();
+        if (entry.path().filename() == "model.bin")
+          fs::create_hard_link(entry.path(), target);
+        else
+          fs::copy_file(entry.path(), target);
+      }
+      config.model_path = unicode_model.u8string();
+      engine->schema()->config()->SetString("ai_predict/model_path", config.model_path);
+      PredictTranslator unicode_translator(rime::Ticket(engine.get(), "ai_predict"));
+      Require(PredictInitTest::Ensure(unicode_translator), "translator resolves and loads the Unicode model path");
       Require(real.Initialize(config), "real CPU model still initializes");
       Require(real.Predict("nihao", 8).value_or("").size() > 0, "normal model prediction is unchanged");
       real.Shutdown();
@@ -268,7 +332,7 @@ static int RunTests(const fs::path& model_source) {
     Require(!fs::exists(temp.path), "remove isolated fixture directory");
     capture.Stop();
     google::ShutdownGoogleLogging();
-    std::cout << "PASS capture-only trace, original exception type/code/message, bounded redaction and model behavior\n";
+    std::cout << "PASS fail-open trace, bounded redaction and model behavior\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "FAIL " << error.what() << '\n';

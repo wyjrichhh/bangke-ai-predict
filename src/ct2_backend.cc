@@ -14,6 +14,7 @@
 #include <chrono>
 #include <climits>
 #include <fstream>
+#include <filesystem>
 #include <optional>
 #include <thread>
 
@@ -321,7 +322,7 @@ std::optional<std::string> CT2Backend::Predict(
 }
 
 bool CT2Backend::LoadSharedVocabulary(const std::string& path) {
-  std::ifstream file(path);
+  std::ifstream file(std::filesystem::u8path(path));
   if (!file.is_open()) {
     LOG(ERROR) << "CT2Backend: cannot open " << path;
     return false;
@@ -367,7 +368,7 @@ void CT2Backend::ResolveDecodeParams(const std::string& model_path,
   // 模型包自带解码参数：训练侧调 beam 之类的约定只需重新出模型，不必我们发版。
   // 文件缺失是正常情况（旧模型），静默落到编译期默认值。
   const std::string path = model_path + "/generation_config.json";
-  std::ifstream file(path);
+  std::ifstream file(std::filesystem::u8path(path));
   if (file.is_open()) {
     try {
       nlohmann::json j;
