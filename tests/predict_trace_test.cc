@@ -22,9 +22,6 @@
 #include <stdexcept>
 #include <typeinfo>
 #include <vector>
-#ifdef _WIN32
-#include <RestartManager.h>
-#endif
 
 namespace fs = std::filesystem;
 using namespace rime::predict;
@@ -87,42 +84,6 @@ struct TempDirectory {
   }
 };
 
-#ifdef _WIN32
-static void DumpModelOwners(const fs::path& root) {
-  std::error_code ec;
-  for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
-    if (it->path().filename() != "model.bin") continue;
-    DWORD session = 0;
-    WCHAR key[CCH_RM_SESSION_KEY + 1]{};
-    DWORD result = RmStartSession(&session, 0, key);
-    if (result != ERROR_SUCCESS) { std::cerr << "rm_start_error=" << result << '\n'; return; }
-    const auto native = it->path().wstring();
-    LPCWSTR resource = native.c_str();
-    result = RmRegisterResources(session, 1, &resource, 0, nullptr, 0, nullptr);
-    UINT needed = 0, count = 0;
-    DWORD reasons = 0;
-    if (result == ERROR_SUCCESS) result = RmGetList(session, &needed, &count, nullptr, &reasons);
-    if (result == ERROR_MORE_DATA) {
-      std::vector<RM_PROCESS_INFO> owners(needed);
-      count = needed;
-      result = RmGetList(session, &needed, &count, owners.data(), &reasons);
-      if (result == ERROR_SUCCESS) for (UINT i = 0; i < count; ++i) {
-        WCHAR image[32768]{};
-        DWORD length = 32768;
-        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owners[i].Process.dwProcessId);
-        const bool named = process && QueryFullProcessImageNameW(process, 0, image, &length);
-        if (process) CloseHandle(process);
-        std::wcerr << L"rm_owner_pid=" << owners[i].Process.dwProcessId
-                   << L" session=" << owners[i].TSSessionId << L" app="
-                   << (named ? fs::path(image).filename().wstring() : L"unknown") << L'\n';
-      }
-    }
-    std::cerr << "rm_result=" << result << '\n';
-    RmEndSession(session);
-    return;
-  }
-}
-#endif
 
 static void Write(const fs::path& path, const std::string& content) {
   std::ofstream stream(path);
@@ -403,14 +364,7 @@ static int RunTests(const fs::path& model_source) {
     CT2Backend::StartShared();
     Require(CT2Backend::ReleaseShared(), "empty reinitialized lifecycle also finalizes");
     api->finalize();
-    std::error_code cleanup_error;
-    fs::remove_all(temp.path, cleanup_error);
-    if (cleanup_error) {
-#ifdef _WIN32
-      DumpModelOwners(temp.path);
-#endif
-      throw fs::filesystem_error("remove isolated fixture", cleanup_error);
-    }
+    fs::remove_all(temp.path);
     Require(!fs::exists(temp.path), "remove isolated fixture directory");
     capture.Stop();
     google::ShutdownGoogleLogging();

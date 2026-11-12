@@ -24,7 +24,7 @@ target_link_libraries(predict_trace_test PRIVATE ${plugin_deps} "${AI_TEST_GLOG_
 if(WIN32)
   # Supply only non-exported helpers; exported Translation methods stay in the DLL.
   target_sources(predict_trace_test PRIVATE rime_windows_helpers.cc)
-  target_link_libraries(predict_trace_test PRIVATE dbghelp Rstrtmgr)
+  target_link_libraries(predict_trace_test PRIVATE dbghelp)
 endif()
 if(MSVC)
   target_compile_options(predict_trace_test PRIVATE /W4 /utf-8)
