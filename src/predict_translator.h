@@ -28,6 +28,9 @@ class PredictTranslator : public Translator {
   friend struct PredictInitTest;
   bool EnsureEngine();
   void ClearFailedPrediction() noexcept;
+  void RefreshResourceObservation();
+  void NotifyResource(const char* token) noexcept;
+  void NotifyResourceFailure(const char* token) noexcept;
   std::filesystem::path ResolveModelPath() const;
   void LoadOptions();
 
@@ -52,6 +55,10 @@ class PredictTranslator : public Translator {
   std::unique_ptr<PredictionEngine> prediction_;
   bool init_attempted_ = false;
   bool init_ok_ = false;
+  // Resource observations are per model, never per key or cache hit.
+  bool resource_failure_notified_ = false;
+  bool invocation_notified_ = false;
+  std::string resource_model_path_;
   /// 上次尝试初始化的模型目录。与当前配置不一致时说明换了模型，两个 latch
   /// 都要归零，否则旧引擎会一直被复用、失败状态也解不开。
   std::string engine_path_;

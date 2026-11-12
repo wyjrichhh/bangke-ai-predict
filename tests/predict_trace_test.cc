@@ -12,9 +12,11 @@
 #include <rime/context.h>
 #include <rime/engine.h>
 #include <rime/schema.h>
+#include <rime/service.h>
 #include <glog/logging.h>
 
 #include <chrono>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,6 +24,7 @@
 #include <stdexcept>
 #include <typeinfo>
 #include <vector>
+#include <thread>
 
 namespace fs = std::filesystem;
 using namespace rime::predict;
@@ -29,8 +32,44 @@ using namespace rime::predict;
 namespace rime::predict {
 struct PredictInitTest {
   static bool Ensure(PredictTranslator& translator) { return translator.EnsureEngine(); }
+  static void SetPath(PredictTranslator& translator, const std::string& path) {
+    translator.model_path_raw_ = path;
+  }
+  static bool PrimeCompletedInference(PredictTranslator& translator,
+                                     std::shared_ptr<InferenceBackend> backend,
+                                     const std::string& input) {
+    translator.RefreshResourceObservation();
+    translator.ctx_opt_.ai_only = true;
+    translator.engine_->context()->set_input(input);
+    const auto context = ContextBuilder::Build(translator.engine_, input,
+                                               translator.ctx_opt_);
+    if (!context) return false;
+    translator.engine_path_ = translator.ResolveModelPath().u8string();
+    translator.init_attempted_ = translator.init_ok_ = true;
+    PredictionEngineOptions options;
+    options.debounce_ms = 0;
+    translator.prediction_ = std::make_unique<PredictionEngine>(
+        translator.engine_, std::move(backend), options);
+    translator.prediction_->Schedule(*context);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (translator.prediction_->GetCachedResult(context->cache_key)) return true;
+      std::this_thread::yield();
+    }
+    return false;
+  }
 };
 }  // namespace rime::predict
+
+class CompletedBackend : public InferenceBackend {
+ public:
+  bool Initialize(const InferenceBackendConfig&) override { return true; }
+  void Shutdown() override {}
+  bool IsInitialized() const override { return true; }
+  std::optional<std::string> Predict(const std::string&, std::optional<int>) override {
+    return "\xe4\xbd\xa0\xe5\xa5\xbd";
+  }
+};
 
 static void Require(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
@@ -139,6 +178,20 @@ static int RunTests(const fs::path& model_source) {
     RimeApi* api = rime_get_api();
     api->setup(&traits);
     api->initialize(&traits);
+    std::vector<std::string> resource_events;
+    const auto resource_observer = [](void* context, RimeSessionId,
+                                      const char* type, const char* value) {
+      if (type && value && std::strcmp(type, "resource") == 0)
+        static_cast<std::vector<std::string>*>(context)->emplace_back(value);
+    };
+    api->set_notification_handler(resource_observer, &resource_events);
+    struct ClearResourceObserver {
+      RimeApi* api;
+      ~ClearResourceObserver() { api->set_notification_handler(nullptr, nullptr); }
+    } clear_resource_observer{api};
+    const auto resource_count = [&](const char* token) {
+      return std::count(resource_events.begin(), resource_events.end(), token);
+    };
 
     capture.overwrite_error = true;
     errno = EACCES;
@@ -172,6 +225,57 @@ static int RunTests(const fs::path& model_source) {
     engine->schema()->config()->SetString("ai_predict/device", "cpu");
     auto* context = engine->context();
     rime::predict::PredictTranslator translator(rime::Ticket(engine.get(), "ai_predict"));
+    const auto missing_before = resource_count("model.failed.vocabulary");
+    Require(!PredictInitTest::Ensure(translator), "missing model produces one resource failure");
+    Require(!PredictInitTest::Ensure(translator), "missing model remains fail-open on retry");
+    Require(resource_count("model.failed.vocabulary") == missing_before + 1,
+            "repeated missing-model query does not duplicate resource events");
+    PredictInitTest::SetPath(translator, "");
+    const auto empty_before = resource_count("model.failed.path");
+    Require(!PredictInitTest::Ensure(translator), "empty model path is reported");
+    Require(!PredictInitTest::Ensure(translator), "empty model path stays fail-open");
+    Require(resource_count("model.failed.path") == empty_before + 1,
+            "empty-model resource failure is emitted once");
+    PredictInitTest::SetPath(translator, "missing-model");
+    Require(!PredictInitTest::Ensure(translator), "changing models permits a new attempt");
+    Require(resource_count("model.failed.vocabulary") == missing_before + 2,
+            "model change resets resource failure deduplication");
+    {
+      PredictTranslator observed(rime::Ticket(engine.get(), "ai_predict"));
+      const auto invoked_before = resource_count("model.invoked");
+      Require(PredictInitTest::PrimeCompletedInference(
+                  observed, std::make_shared<CompletedBackend>(), "nihao"),
+              "a backend completes an asynchronous result in the real cache");
+      Require(resource_count("model.invoked") == invoked_before,
+              "worker completion itself never notifies Rime");
+      Require(bool(observed.Query("nihao", rime::Segment(0, 5))),
+              "client Query observes the completed result");
+      Require(bool(observed.Query("nihao", rime::Segment(0, 5))),
+              "cached candidate remains available");
+      Require(resource_count("model.invoked") == invoked_before + 1,
+              "only the first successful client observation emits invoked");
+      PredictInitTest::SetPath(observed, "another-model");
+      Require(PredictInitTest::PrimeCompletedInference(
+                  observed, std::make_shared<CompletedBackend>(), "nihao"),
+              "another model completes its own inference");
+      Require(bool(observed.Query("nihao", rime::Segment(0, 5))),
+              "client observes the new model's result");
+      Require(resource_count("model.invoked") == invoked_before + 2,
+              "model change resets successful invocation observation");
+    }
+    {
+      PredictTranslator callback_failure(rime::Ticket(engine.get(), "ai_predict"));
+      Require(PredictInitTest::PrimeCompletedInference(
+                  callback_failure, std::make_shared<CompletedBackend>(), "nihao"),
+              "prepare completed inference for notification failure");
+      api->set_notification_handler([](void*, RimeSessionId, const char*, const char*) {
+        throw std::runtime_error("synthetic resource observer failure");
+      }, nullptr);
+      Require(bool(callback_failure.Query("nihao", rime::Segment(0, 5))),
+              "throwing resource observer cannot hide a completed candidate");
+      api->set_notification_handler(resource_observer, &resource_events);
+    }
+    context->Clear();
     const auto original = std::make_exception_ptr(std::system_error(
         std::make_error_code(std::errc::permission_denied),
         "synthetic_document_secret: cannot open C:\\Users\\PrivateUser\\model.bin"));
@@ -322,7 +426,11 @@ static int RunTests(const fs::path& model_source) {
       config.model_path = unicode_model.u8string();
       engine->schema()->config()->SetString("ai_predict/model_path", config.model_path.c_str());
       PredictTranslator unicode_translator(rime::Ticket(engine.get(), "ai_predict"));
+      const auto ready_before = resource_count("model.ready");
       Require(PredictInitTest::Ensure(unicode_translator), "translator resolves and loads the Unicode model path");
+      Require(PredictInitTest::Ensure(unicode_translator), "ready model is reused");
+      Require(resource_count("model.ready") == ready_before + 1,
+              "real model readiness is reported once without raising severity");
       for (const char* corrupt : {"shared_vocabulary.json", "tokenizer.json"}) {
         const auto invalid_model = temp.path / fs::u8path(std::string("invalid-") + corrupt);
         fs::create_directories(invalid_model);
@@ -345,6 +453,14 @@ static int RunTests(const fs::path& model_source) {
       Require(!capture.Contains(google::GLOG_INFO, "phase=end"),
               "successful initialization does not emit per-stage INFO");
     }
+    const std::vector<std::string> resource_tokens{
+        "dictionary.ready", "dictionary.failed.no-table", "dictionary.failed.table",
+        "dictionary.failed.prism", "model.ready", "model.failed.path",
+        "model.failed.vocabulary", "model.failed.backend", "model.failed.exception",
+        "model.invoked"};
+    for (const auto& event : resource_events)
+      Require(std::find(resource_tokens.begin(), resource_tokens.end(), event) != resource_tokens.end(),
+              "resource notifications contain only fixed protocol tokens");
     Require(CT2Backend::ReleaseShared(), "explicit release drains background model teardown");
     if (!model_source.empty()) {
       InferenceBackendConfig config;

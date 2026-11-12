@@ -221,6 +221,7 @@ std::filesystem::path PredictTranslator::ResolveModelPath() const {
 }
 
 bool PredictTranslator::EnsureEngine() {
+  RefreshResourceObservation();
   TraceInitStage("ensure_engine", "begin", model_path_raw_, device_);
   if (!enabled_) {
     TraceInitStage("ensure_engine", "disabled", model_path_raw_, device_);
@@ -237,6 +238,8 @@ bool PredictTranslator::EnsureEngine() {
   if (path.u8string() != engine_path_) {
     init_attempted_ = false;
     init_ok_ = false;
+    resource_failure_notified_ = false;
+    invocation_notified_ = false;
     prediction_.reset();
   }
 
@@ -255,12 +258,14 @@ bool PredictTranslator::EnsureEngine() {
   TraceInitStage("path_cache_store", "end", model_path_raw_, device_);
   if (path.empty()) {
     LOG(ERROR) << "ai_predict_translator: ai_predict/model_path is not set";
+    NotifyResourceFailure("model.failed.path");
     return false;
   }
   TraceInitStage("vocabulary_exists", "begin", model_path_raw_, device_);
   if (!std::filesystem::exists(path / "shared_vocabulary.json")) {
     TraceInitStage("vocabulary_failure_log", "failed", model_path_raw_, device_);
     LOG(ERROR) << "ai_predict_translator: model directory missing shared_vocabulary.json";
+    NotifyResourceFailure("model.failed.vocabulary");
     return false;
   }
   TraceInitStage("vocabulary_exists", "end", model_path_raw_, device_);
@@ -275,6 +280,7 @@ bool PredictTranslator::EnsureEngine() {
   TraceInitStage("backend_shared", backend ? "end" : "failed", model_path_raw_, device_);
   if (!backend) {
     LOG(ERROR) << "ai_predict_translator: failed to initialize CT2 backend";
+    NotifyResourceFailure("model.failed.backend");
     return false;
   }
   TraceInitStage("prediction_engine", "begin", model_path_raw_, device_);
@@ -284,6 +290,7 @@ bool PredictTranslator::EnsureEngine() {
   init_ok_ = true;
   TraceInitStage("ready_log", "begin", model_path_raw_, device_);
   LOG(INFO) << "ai_predict_translator: model ready";
+  NotifyResource("model.ready");
   TraceInitStage("ensure_engine", "end", model_path_raw_, device_);
   return true;
 }
@@ -292,6 +299,7 @@ an<Translation> PredictTranslator::Query(const string& input,
                                          const Segment& segment) {
   InitTraceScope trace_scope;
   try {
+    RefreshResourceObservation();
     TraceInitStage("query", "begin", model_path_raw_, device_);
 
     // pending 只表示「刚 Schedule 完、结果还没落进缓存」。每趟 Query 先清掉，只有真的
@@ -330,6 +338,10 @@ an<Translation> PredictTranslator::Query(const string& input,
 
     if (auto raw = prediction_->GetCachedResult(built->cache_key)) {
       if (!raw->empty()) {
+        if (!invocation_notified_) {
+          invocation_notified_ = true;
+          NotifyResource("model.invoked");
+        }
         const string display = ExtractDisplayText(*raw, filter_punctuation_);
         // A cached result is deterministic: if its display text is unusable
         // (empty after punctuation strip, or too few Hanzi), re-scheduling would
@@ -378,13 +390,39 @@ an<Translation> PredictTranslator::Query(const string& input,
 
   } catch (const std::exception& error) {
     TraceInitException(error, model_path_raw_, device_);
+    NotifyResourceFailure("model.failed.exception");
     ClearFailedPrediction();
     return nullptr;
   } catch (...) {
     TraceInitFailure(init_trace_stage, "unknown_exception", "none", 0, 0,
                      "unknown exception", model_path_raw_, device_);
+    NotifyResourceFailure("model.failed.exception");
     ClearFailedPrediction();
     return nullptr;
+  }
+}
+
+void PredictTranslator::RefreshResourceObservation() {
+  if (resource_model_path_ != model_path_raw_) {
+    resource_model_path_ = model_path_raw_;
+    resource_failure_notified_ = false;
+    invocation_notified_ = false;
+  }
+}
+
+void PredictTranslator::NotifyResource(const char* token) noexcept {
+  InitTraceErrorState preserve_errors;
+  try {
+    Service::instance().Notify(0, "resource", token);
+  } catch (...) {
+    std::fputs("ai_predict_translator: resource notification failed\n", stderr);
+  }
+}
+
+void PredictTranslator::NotifyResourceFailure(const char* token) noexcept {
+  if (!resource_failure_notified_) {
+    resource_failure_notified_ = true;
+    NotifyResource(token);
   }
 }
 
