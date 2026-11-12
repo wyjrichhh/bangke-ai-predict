@@ -363,7 +363,9 @@ static int RunTests(const fs::path& model_source) {
     Require(capture.LastError().find(temp.path.u8string()) == std::string::npos,
             "backend exception redacts the configured path");
     try {
-      (void)nlohmann::json::parse("{");
+      const auto parsed = nlohmann::json::parse("{");
+      (void)parsed;
+      Require(false, "invalid JSON throws before returning a value");
     } catch (const nlohmann::json::exception& error) {
       TraceInitStage("json_probe", "begin", "", "cpu");
       TraceInitException(error, "", "cpu");
@@ -475,6 +477,8 @@ static int RunTests(const fs::path& model_source) {
       Require(CT2Backend::ReleaseShared(), "second lifecycle drains model teardown");
       Require(released.expired(), "shared backend does not survive lifecycle finalization");
     }
+    nested_engine.reset();
+    engine.reset();
     api->finalize();
     api->initialize(&traits);
     CT2Backend::StartShared();
