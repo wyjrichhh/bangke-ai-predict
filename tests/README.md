@@ -90,3 +90,7 @@ The log-sink fixture detects whether the configured glog headers expose
 the same severity/message assertions instead of skipping diagnostics on Linux
 compatibility SDKs. Always pair the configured headers with their actual glog
 library.
+
+When linking tests and Rime to the same shared glog (for example Ubuntu 22.04),
+set `AI_TEST_RIME_OWNS_LOGGING=ON` so Rime setup performs the single logging
+initialization. Keep it off for SDKs with a private static logger.

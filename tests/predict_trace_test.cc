@@ -121,7 +121,9 @@ static rime::Config* Configuration(const fs::path& model, bool ai_only = false) 
 
 static int RunTests(const fs::path& model_source) {
   try {
+#ifndef AI_TEST_RIME_OWNS_LOGGING
     google::InitGoogleLogging("predict_trace_test");
+#endif
     FLAGS_logtostderr = true;
     Capture capture;
     TempDirectory temp;

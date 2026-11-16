@@ -193,7 +193,9 @@ int main(int argc, char** argv) {
   std::ofstream(isolated / "default.yaml") << "schema_list: []\n";
   std::ofstream(isolated / "user.yaml") << "{}\n";
   const auto isolated_utf8 = isolated.u8string();
+#ifndef AI_TEST_RIME_OWNS_LOGGING
   google::InitGoogleLogging("predict_async_test");
+#endif
   FLAGS_logtostderr = true;
   FLAGS_minloglevel = 2;
   RimeTraits traits{};
