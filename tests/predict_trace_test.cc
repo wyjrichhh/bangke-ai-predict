@@ -322,10 +322,16 @@ static int RunTests(const fs::path& model_source) {
       for (const auto& entry : fs::directory_iterator(model_source)) {
         if (!entry.is_regular_file()) continue;
         const auto target = unicode_model / entry.path().filename();
-        if (entry.path().filename() == "model.bin")
-          fs::create_hard_link(entry.path(), target);
-        else
+        if (entry.path().filename() == "model.bin") {
+          std::error_code error;
+          fs::create_hard_link(entry.path(), target, error);
+          if (error == std::errc::cross_device_link)
+            fs::copy_file(entry.path(), target);
+          else if (error)
+            throw fs::filesystem_error("link model fixture", entry.path(), target, error);
+        } else {
           fs::copy_file(entry.path(), target);
+        }
       }
       config.model_path = unicode_model.u8string();
       engine->schema()->config()->SetString("ai_predict/model_path", config.model_path.c_str());
