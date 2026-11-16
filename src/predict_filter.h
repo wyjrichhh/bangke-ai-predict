@@ -9,6 +9,7 @@
 #define RIME_PREDICT_PREDICT_FILTER_H_
 
 #include <rime/filter.h>
+#include "context_builder.h"
 #include <rime/gear/filter_commons.h>
 #include <rime/translation.h>
 
@@ -37,6 +38,7 @@ class PredictFilter : public Filter, TagMatching {
   /// ai_predict/ai_only). Word candidates would otherwise sit in front of it
   /// and the mode exists precisely to hand the choice to the model.
   bool ai_only_ = false;
+  ContextBuilderOptions ctx_opt_;
 };
 
 }  // namespace predict

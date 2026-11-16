@@ -11,6 +11,8 @@
 
 #include <rime/commit_history.h>
 #include <rime/context.h>
+#include <rime/config.h>
+#include <rime/schema.h>
 #include <rime/engine.h>
 
 namespace rime {
@@ -163,6 +165,72 @@ int CountHan(const string& text) {
       ++n;
   }
   return n;
+}
+
+ContextBuilderOptions ContextBuilder::ReadOptions(Config* config) {
+  ContextBuilderOptions opt;
+  if (!config) return opt;
+  int n = 0;
+  if (config->GetInt("ai_predict/min_input_length", &n) && n > 0) opt.min_effective_length = n;
+  if (config->GetInt("ai_predict/min_context_prompt_length", &n) && n > 0) opt.min_context_prompt_length = n;
+  if (config->GetInt("ai_predict/context_window_size", &n) && n > 0) opt.context_window_size = n;
+  if (config->GetInt("ai_predict/context_window_chars", &n) && n > 0) opt.context_window_chars = n;
+  config->GetBool("ai_predict/use_frontend_context", &opt.use_frontend_context);
+  config->GetBool("ai_predict/ai_only", &opt.ai_only);
+  return opt;
+}
+
+string ContextBuilder::CurrentInput(Engine* engine) {
+  if (!engine || !engine->context()) return {};
+  auto* context = engine->context();
+  return context->input().substr(0, context->caret_pos());
+}
+
+namespace {
+void AppendScopePart(string* scope, const string& value) {
+  *scope += std::to_string(value.size()) + ":" + value;
+}
+}
+
+string ContextBuilder::InputSignature(Engine* engine, const ContextBuilderOptions& opt) {
+  if (!engine || !engine->context()) return {};
+  auto* context = engine->context();
+  string signature;
+  AppendScopePart(&signature, context->input());
+  AppendScopePart(&signature, std::to_string(context->caret_pos()));
+  AppendScopePart(&signature, context->get_property(protocol::kClientContext));
+  AppendScopePart(&signature, context->get_option("ascii_mode") ? "1" : "0");
+  const auto& composition = context->composition();
+  if (!composition.empty()) {
+    AppendScopePart(&signature, std::to_string(composition.back().start));
+    AppendScopePart(&signature, std::to_string(composition.back().end));
+  }
+  if (auto built = Build(engine, CurrentInput(engine), opt))
+    AppendScopePart(&signature, built->cache_key);
+  return signature;
+}
+
+string ContextBuilder::PredictionScope(Engine* engine, const PredictionContext& prediction) {
+  if (!engine || !engine->context() || !engine->schema()) return {};
+  auto* context = engine->context();
+  const auto& composition = context->composition();
+  if (composition.empty() || context->get_option("ascii_mode")) return {};
+  string scope;
+  AppendScopePart(&scope, engine->schema()->schema_id());
+  AppendScopePart(&scope, context->input());
+  AppendScopePart(&scope, std::to_string(context->caret_pos()));
+  AppendScopePart(&scope, std::to_string(composition.back().start));
+  AppendScopePart(&scope, std::to_string(composition.back().end));
+  AppendScopePart(&scope, prediction.cache_key);
+  return scope;
+}
+
+bool FitsPredictionInput(const string& display, const string& prompt, bool ai_only) {
+  if (ai_only) return true;
+  const auto letters = std::count_if(prompt.begin(), prompt.end(), [](unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+  });
+  return CountHan(display) <= letters;
 }
 
 std::optional<PredictionContext> ContextBuilder::Build(

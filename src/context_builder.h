@@ -13,14 +13,14 @@
 
 namespace rime {
 
+class Config;
 class Context;
 class Engine;
 
 namespace predict {
 
 struct PredictionContext {
-  /// Pure pinyin being composed (spaces stripped). Doubles as the key for the
-  /// engine's "does the composition still match the request we sent" check.
+  /// Pinyin being composed (spaces stripped), also used for display eligibility.
   string effective_prompt;
   /// Recent commit history: everything that reached the screen, Hanzi plus the
   /// digits/Latin/punctuation typed around it. Empty when there is no history.
@@ -70,6 +70,10 @@ struct ContextBuilderOptions {
 
 class ContextBuilder {
  public:
+  static ContextBuilderOptions ReadOptions(Config* config);
+  static string CurrentInput(Engine* engine);
+  static string InputSignature(Engine* engine, const ContextBuilderOptions& opt);
+  static string PredictionScope(Engine* engine, const PredictionContext& prediction);
   /// Returns empty optional if prediction should be skipped (length gate).
   static std::optional<PredictionContext> Build(Engine* engine,
                                                 const string& raw_input,
@@ -97,6 +101,10 @@ bool IsDisplayableCandidate(const string& display);
 /// candidates, which the schema dictionary already ranks by frequency far more
 /// reliably than the model's context-free continuation.
 int CountHan(const string& text);
+
+// Ordinary pinyin conversion must not turn a few letters into a long paragraph.
+// Explicit AI-only generation is not constrained by the pinyin length.
+bool FitsPredictionInput(const string& display, const string& prompt, bool ai_only);
 
 }  // namespace predict
 }  // namespace rime

@@ -1,4 +1,4 @@
-# Unicode model initialization and fail-open tests
+# AI plugin regression tests
 
 This target compiles the diagnostic plugin sources and reuses compatible Rime,
 Boost, static glog and CT2 dependencies. It does not rebuild Rime and does not
@@ -12,7 +12,7 @@ cmake -S tests -B <task-build> -DCMAKE_BUILD_TYPE=Release \
   -DAI_TEST_RIME_LIBRARY=<matching-rime-library> \
   -DAI_TEST_GLOG_LIBRARY=<matching-static-glog-library> \
   -DAI_TEST_BOOST_INCLUDE=<boost-headers>
-cmake --build <task-build> --config Release --target predict_trace_test
+cmake --build <task-build> --config Release --target predict_trace_test predict_async_test
 ctest --test-dir <task-build> -C Release --output-on-failure
 ```
 
@@ -59,3 +59,34 @@ teardown threads, including their CRT/TLS exit. The Rime DLL has separate plugin
 state; its module-finalize hook must additionally pass an isolated CAPI process
 exit test with an external timeout. The fixture does not prove DLL unload safety
 by testing the EXE's state alone.
+
+## Asynchronous prediction scope
+
+`predict_async` exercises the production worker, translator and filter against
+real Rime contexts with a condition-variable-controlled backend. It covers
+superseded requests, cancellation, A-B-A replacement, late cache publication,
+input deletion/retyping, caret/segment/document-context changes, ASCII mode,
+orphan AI rows, same-input refresh, completed empty results, normal long input
+and explicit AI-only generation. It does not use sleeps to guess when a worker
+completed: the next backend entry supplies the ordering barrier.
+
+Published AI text is bound to the current input, caret, active segment, schema
+and context-derived cache key. Caller-thread observers invalidate changed input
+scopes; workers never read or refresh Rime contexts. Cancellation prevents a
+result from being published, but does not interrupt an already-running CT2 call.
+Ordinary mode rejects a prediction with more Hanzi than pinyin letters, instead
+of truncating an unrelated paragraph; AI-only mode retains free generation.
+
+When `BANGKE_AI_TEST_MODEL_DIR` is supplied, `predict_async_model` also loads the
+actual model through the registered plugin and Rime C API, deploys a small real
+Chinese dictionary, pumps the same `soft_cursor` refresh used by the frontends,
+and verifies long input, clear/retype, short mixed input, dictionary preservation
+and caret invalidation. All data is isolated; no user dictionary or frontend
+installation is modified. This is engine/API coverage, not IMK/TSF/Fcitx GUI
+acceptance.
+
+The log-sink fixture detects whether the configured glog headers expose
+`LogMessageTime`; older SDKs use the equivalent `tm` callback. This preserves
+the same severity/message assertions instead of skipping diagnostics on Linux
+compatibility SDKs. Always pair the configured headers with their actual glog
+library.

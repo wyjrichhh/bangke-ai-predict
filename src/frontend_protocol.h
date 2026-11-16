@@ -57,6 +57,9 @@ inline constexpr const char* kCommentHighlight = "_comment_highlight";
 // that the outbound builders below have to satisfy.
 inline constexpr const char* kClientContext = "ai_predict/client_context";
 
+// Internal binding between translator and filter; local to the current schema.
+inline constexpr const char* kPredictionScope = "_ai_predict/scope";
+
 // The frontend table also reserves "_comment_warning" (render comment
 // with warning_text_color). This plugin never flags a prediction as a
 // warning, so the key is intentionally not declared here -- add a

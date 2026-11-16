@@ -10,6 +10,7 @@
 #include "prediction_engine.h"
 
 #include <rime/translator.h>
+#include <boost/signals2/connection.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -28,6 +29,7 @@ class PredictTranslator : public Translator {
   friend struct PredictInitTest;
   bool EnsureEngine();
   void ClearFailedPrediction() noexcept;
+  void ObserveContext() noexcept;
   std::filesystem::path ResolveModelPath() const;
   void LoadOptions();
 
@@ -50,6 +52,10 @@ class PredictTranslator : public Translator {
   bool filter_punctuation_ = true;
 
   std::unique_ptr<PredictionEngine> prediction_;
+  std::string observed_input_signature_;
+  boost::signals2::scoped_connection input_connection_;
+  boost::signals2::scoped_connection property_connection_;
+  boost::signals2::scoped_connection option_connection_;
   bool init_attempted_ = false;
   bool init_ok_ = false;
   /// 上次尝试初始化的模型目录。与当前配置不一致时说明换了模型，两个 latch

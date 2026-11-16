@@ -4,6 +4,7 @@
 #include "predict_translator.h"
 
 #include "context_builder.h"
+#include "frontend_protocol.h"
 #include "ct2_backend.h"
 #include "init_trace.h"
 
@@ -67,11 +68,15 @@ class AIPredictTranslation : public UniqueTranslation {
   }
 };
 
-void PublishAITextProperty(Engine* engine, const string& text) {
+void PublishAITextProperty(Engine* engine, const string& text, const string& scope = {}) {
   if (!engine || !engine->context()) {
     return;
   }
   Context* ctx = engine->context();
+  if (ctx->get_property(protocol::kPredictionScope) != scope) {
+    if (!ctx->get_property(kAITextProperty).empty()) ctx->set_property(kAITextProperty, "");
+    ctx->set_property(protocol::kPredictionScope, scope);
+  }
   if (ctx->get_property(kAITextProperty) != text) {
     ctx->set_property(kAITextProperty, text);
   }
@@ -105,6 +110,19 @@ PredictTranslator::PredictTranslator(const Ticket& ticket) : Translator(ticket) 
             << (engine_ && engine_->schema() ? engine_->schema()->schema_id() : "<null>")
             << ")";
   LoadOptions();
+  ObserveContext();
+  if (engine_ && engine_->context()) {
+    auto* context = engine_->context();
+    input_connection_ = context->update_notifier().connect([this](Context*) { ObserveContext(); });
+    property_connection_ = context->property_update_notifier().connect(
+        [this](Context*, const string& name) {
+          if (name == protocol::kClientContext) ObserveContext();
+        });
+    option_connection_ = context->option_update_notifier().connect(
+        [this](Context*, const string& name) {
+          if (name == "ascii_mode") ObserveContext();
+        });
+  }
 }
 
 PredictTranslator::~PredictTranslator() = default;
@@ -119,18 +137,7 @@ void PredictTranslator::LoadOptions() {
     model_path_raw_ = path;
   }
   int n = 0;
-  if (config->GetInt("ai_predict/min_input_length", &n) && n > 0) {
-    ctx_opt_.min_effective_length = n;
-  }
-  if (config->GetInt("ai_predict/min_context_prompt_length", &n) && n > 0) {
-    ctx_opt_.min_context_prompt_length = n;
-  }
-  if (config->GetInt("ai_predict/context_window_size", &n) && n > 0) {
-    ctx_opt_.context_window_size = n;
-  }
-  if (config->GetInt("ai_predict/context_window_chars", &n) && n > 0) {
-    ctx_opt_.context_window_chars = n;
-  }
+  ctx_opt_ = ContextBuilder::ReadOptions(config);
   if (config->GetInt("ai_predict/debounce_ms", &n) && n > 0) {
     engine_opt_.debounce_ms = n;
   }
@@ -181,14 +188,6 @@ void PredictTranslator::LoadOptions() {
   bool enabled = true;
   if (config->GetBool("ai_predict/enabled", &enabled)) {
     enabled_ = enabled;
-  }
-  bool use_frontend = true;
-  if (config->GetBool("ai_predict/use_frontend_context", &use_frontend)) {
-    ctx_opt_.use_frontend_context = use_frontend;
-  }
-  bool ai_only = false;
-  if (config->GetBool("ai_predict/ai_only", &ai_only)) {
-    ctx_opt_.ai_only = ai_only;
   }
   LOG(INFO) << "ai_predict_translator: options loaded"
             << " model_configured=" << !model_path_raw_.empty()
@@ -293,11 +292,16 @@ an<Translation> PredictTranslator::Query(const string& input,
   InitTraceScope trace_scope;
   try {
     TraceInitStage("query", "begin", model_path_raw_, device_);
+    ObserveContext();
 
     // pending 只表示「刚 Schedule 完、结果还没落进缓存」。每趟 Query 先清掉，只有真的
     // 调度了才重新置上：EnsureEngine/Build/is_active_segment 这些提前返回都不代表有推理
     // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
     PublishPendingProperty(engine_, false);
+    if (engine_ && engine_->context() && engine_->context()->get_option("ascii_mode")) {
+      ClearFailedPrediction();
+      return nullptr;
+    }
     if (!EnsureEngine()) {
       ClearFailedPrediction();
 
@@ -312,13 +316,8 @@ an<Translation> PredictTranslator::Query(const string& input,
     // 于是只能给出半截答案（日志实测：input='ufashihen...' → 'ufa是很好用的…'）。
     // 已上屏的中文不在 input 里（它走 commit_history 进 window），所以这里取全串不会
     // 重复。段的 start/end 仍然只用于候选跨度，不受影响。
-    string prompt_input = input;
-    if (engine_ && engine_->context()) {
-      Context* ctx = engine_->context();
-      const string& full = ctx->input();
-      const size_t caret = ctx->caret_pos();
-      prompt_input = caret < full.size() ? full.substr(0, caret) : full;
-    }
+    const string prompt_input = engine_ && engine_->context()
+        ? ContextBuilder::CurrentInput(engine_) : input;
     auto built = ContextBuilder::Build(engine_, prompt_input, ctx_opt_);
     if (!built) {
       // 失败路径不清缓存：缓存按 window_text|prompt 作 key，旧结果只会在同一输入下
@@ -328,7 +327,22 @@ an<Translation> PredictTranslator::Query(const string& input,
       return nullptr;
     }
 
+    bool is_active_segment = false;
+    bool user_navigated = false;
+    if (engine_ && engine_->context()) {
+      const Composition& comp = engine_->context()->composition();
+      is_active_segment =
+          !comp.empty() && comp.back().start == segment.start &&
+          comp.back().end == segment.end;
+      user_navigated = !comp.empty() && comp.back().selected_index > 0;
+    }
+    if (!is_active_segment) return nullptr;
+
     if (auto raw = prediction_->GetCachedResult(built->cache_key)) {
+      if (raw->empty()) {
+        PublishAITextProperty(engine_, "");
+        return nullptr;
+      }
       if (!raw->empty()) {
         const string display = ExtractDisplayText(*raw, filter_punctuation_);
         // A cached result is deterministic: if its display text is unusable
@@ -337,9 +351,10 @@ an<Translation> PredictTranslator::Query(const string& input,
         // on a HIT we either surface the candidate or give up for this key; we
         // never fall through to Schedule().
         if (!display.empty() && IsDisplayableCandidate(display) &&
-            CountHan(display) >= min_hanzi_) {
+            CountHan(display) >= min_hanzi_ &&
+            FitsPredictionInput(display, built->effective_prompt, ctx_opt_.ai_only)) {
 
-          PublishAITextProperty(engine_, display);
+          PublishAITextProperty(engine_, display, ContextBuilder::PredictionScope(engine_, *built));
           auto cand = New<SimpleCandidate>("ai_predict", segment.start, segment.end,
                                            display, "AI");
           return New<AIPredictTranslation>(cand);
@@ -351,22 +366,6 @@ an<Translation> PredictTranslator::Query(const string& input,
     }
 
     PublishAITextProperty(engine_, "");
-    // 只有「当前段」（最后一个 segment）才调度推理。composition 会被大写 raw 段切成
-    // 多个拼音段, 若每个段都各自调度, 单槽 cache 会被多段轮流覆盖, 形成「A 命中→B 未
-    // 命中→调度 B→B 命中→A 未命中」的乒乓, 候选在词库与 AI 之间来回闪烁。前面的段
-    // 前端不读它的 menu, 调度了也白调度, 还抢 cache。
-    bool is_active_segment = false;
-    bool user_navigated = false;
-    if (engine_ && engine_->context()) {
-      const Composition& comp = engine_->context()->composition();
-      is_active_segment =
-          !comp.empty() && comp.back().start == segment.start &&
-          comp.back().end == segment.end;
-      user_navigated = !comp.empty() && comp.back().selected_index > 0;
-    }
-    if (!is_active_segment) {
-      return nullptr;
-    }
     prediction_->Schedule(*built);
     // 置上 pending 就是请前端重排一次。用户已经翻页或移动高亮时不能置：重排会把
     // selected_index 归零，表现是候选栏自己跳回第一页。仍调度——缓存填上，下次按键
@@ -388,9 +387,36 @@ an<Translation> PredictTranslator::Query(const string& input,
   }
 }
 
+void PredictTranslator::ObserveContext() noexcept {
+  InitTraceScope trace_scope;
+  TraceInitStage("context_update", "begin", model_path_raw_, device_);
+  try {
+    const auto current = ContextBuilder::InputSignature(engine_, ctx_opt_);
+    if (current == observed_input_signature_) return;
+    observed_input_signature_ = current;
+    if (prediction_) prediction_->ClearCache();
+    ClearFailedPrediction();
+  } catch (const std::exception& error) {
+    try { TraceInitException(error, model_path_raw_, device_); }
+    catch (...) { std::fputs("ai_predict_translator: context diagnostics unavailable\n", stderr); }
+    ClearFailedPrediction();
+  } catch (...) {
+    try {
+      TraceInitFailure("context_update", "unknown_exception", "none", 0, 0,
+                       "unknown exception", model_path_raw_, device_);
+    } catch (...) { std::fputs("ai_predict_translator: context diagnostics unavailable\n", stderr); }
+    ClearFailedPrediction();
+  }
+}
+
 void PredictTranslator::ClearFailedPrediction() noexcept {
   // Notifications may themselves throw; clear each property independently.
   unsigned cleanup_errors = 0;
+  try {
+    if (engine_ && engine_->context() &&
+        !engine_->context()->get_property(protocol::kPredictionScope).empty())
+      engine_->context()->set_property(protocol::kPredictionScope, "");
+  } catch (...) { ++cleanup_errors; }
   try { PublishPendingProperty(engine_, false); } catch (...) { ++cleanup_errors; }
   try { PublishAITextProperty(engine_, ""); } catch (...) { ++cleanup_errors; }
   if (cleanup_errors) {

@@ -5,29 +5,16 @@
 
 #include <glog/logging.h>
 
-#include <algorithm>
 #include <chrono>
 
-#include <rime/context.h>
-#include <rime/engine.h>
 
 namespace rime {
 namespace predict {
 
-namespace {
-
-string StripSpaces(const string& s) {
-  string out = s;
-  out.erase(std::remove(out.begin(), out.end(), ' '), out.end());
-  return out;
-}
-
-}  // namespace
-
-PredictionEngine::PredictionEngine(Engine* engine,
+PredictionEngine::PredictionEngine(Engine* /*engine*/,
                                    std::shared_ptr<InferenceBackend> backend,
                                    const PredictionEngineOptions& opt)
-    : engine_(engine), backend_(std::move(backend)), opt_(opt) {
+    : backend_(std::move(backend)), opt_(opt) {
   worker_ = std::thread(&PredictionEngine::WorkerLoop, this);
 }
 
@@ -52,7 +39,7 @@ void PredictionEngine::Schedule(const PredictionContext& ctx) {
   }
   pending_ct2_input_ = ctx.ct2_input;
   pending_cache_key_ = ctx.cache_key;
-  pending_prompt_ = ctx.effective_prompt;
+  ++request_generation_;
   worker_cv_.notify_one();
 }
 
@@ -66,16 +53,23 @@ std::optional<std::string> PredictionEngine::GetCachedResult(
 }
 
 void PredictionEngine::ClearCache() {
-  std::lock_guard<std::mutex> lock(result_mutex_);
-  last_cache_key_.clear();
-  last_raw_result_.reset();
+  std::lock_guard<std::mutex> worker_lock(worker_mutex_);
+  ++request_generation_;
+  pending_ct2_input_.clear();
+  pending_cache_key_.clear();
+  {
+    std::lock_guard<std::mutex> result_lock(result_mutex_);
+    last_cache_key_.clear();
+    last_raw_result_.reset();
+  }
+  worker_cv_.notify_one();
 }
 
 void PredictionEngine::WorkerLoop() {
   while (true) {
     string ct2_input;
     string cache_key;
-    string prompt_snap;
+    uint64_t generation = 0;
     {
       std::unique_lock<std::mutex> lock(worker_mutex_);
       worker_cv_.wait(lock, [this] {
@@ -87,7 +81,7 @@ void PredictionEngine::WorkerLoop() {
       ct2_input = pending_ct2_input_;
       pending_ct2_input_.clear();
       cache_key = pending_cache_key_;
-      prompt_snap = pending_prompt_;
+      generation = request_generation_;
 
       // Debounce: wait for quiet period, coalescing rapid updates.
       while (true) {
@@ -97,11 +91,15 @@ void PredictionEngine::WorkerLoop() {
         }
         if (shutdown_)
           return;
+        if (generation != request_generation_ && pending_ct2_input_.empty()) {
+          ct2_input.clear();
+          break;
+        }
         if (!pending_ct2_input_.empty()) {
           ct2_input = pending_ct2_input_;
           pending_ct2_input_.clear();
           cache_key = pending_cache_key_;
-          prompt_snap = pending_prompt_;
+          generation = request_generation_;
         }
       }
     }
@@ -118,13 +116,16 @@ void PredictionEngine::WorkerLoop() {
     if (!result || result->empty()) {
       LOG(WARNING) << "PredictionEngine: inference failed or empty (took "
                    << dt_ms << " ms)";
-      continue;
     }
 
     {
-      std::lock_guard<std::mutex> lock(result_mutex_);
+      std::lock_guard<std::mutex> worker_lock(worker_mutex_);
+      if (shutdown_ || generation != request_generation_) continue;
+      std::lock_guard<std::mutex> result_lock(result_mutex_);
       last_cache_key_ = cache_key;
-      last_raw_result_ = result;
+      // Empty is a completed failure, not a cache miss to retry indefinitely.
+      last_raw_result_ = result.value_or(string());
+      pending_cache_key_.clear();
     }
 
     // Nothing else happens on this thread, on purpose.
@@ -143,7 +144,6 @@ void PredictionEngine::WorkerLoop() {
     // a cache miss and clears it on a hit, and the frontend forces a refresh
     // from its own thread while that flag is up.
 
-    (void)prompt_snap;
   }
 }
 

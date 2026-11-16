@@ -16,6 +16,7 @@
 #include <rime/translation.h>
 
 #include "frontend_protocol.h"
+#include "init_trace.h"
 
 namespace rime {
 namespace predict {
@@ -65,6 +66,7 @@ class AIPredictFilteredTranslation : public Translation {
         segment_start_(segment_start),
         segment_end_(segment_end) {
     Build();
+    SkipUpstreamAI();
     set_exhausted(cursor_ >= reordered_.size() &&
                   (!PullsFromUpstream() || !upstream_ ||
                    upstream_->exhausted()));
@@ -89,6 +91,7 @@ class AIPredictFilteredTranslation : public Translation {
     } else if (PullsFromUpstream() && upstream_ && !upstream_->exhausted()) {
       upstream_->Next();
     }
+    SkipUpstreamAI();
     if (cursor_ >= reordered_.size() &&
         (!PullsFromUpstream() || !upstream_ || upstream_->exhausted())) {
       set_exhausted(true);
@@ -108,8 +111,17 @@ class AIPredictFilteredTranslation : public Translation {
   }
 
  private:
+  void SkipUpstreamAI() {
+    if (!PullsFromUpstream() || cursor_ < reordered_.size()) return;
+    while (upstream_ && !upstream_->exhausted()) {
+      auto candidate = upstream_->Peek();
+      if (candidate && candidate->type() != kAICandidateType) break;
+      upstream_->Next();
+    }
+  }
+
   void Build() {
-    if (!upstream_) return;
+    if (!upstream_ || (ai_text_.empty() && !ai_only_)) return;
 
     std::vector<an<Candidate>> buf;
     buf.reserve(search_range_);
@@ -142,34 +154,15 @@ class AIPredictFilteredTranslation : public Translation {
       reordered_.clear();
       if (!ai_text_.empty()) {
         an<Candidate> ai;
-        for (const auto& c : buf) {
-          if (c && c->type() == kAICandidateType) {
-            ai = c;
-            break;
-          }
-        }
-        if (!ai && segment_end_ > segment_start_) {
-          // Rebuild it spanning the whole segment. Borrowing a word candidate's
-          // range here looks harmless and is not: Segment::Close splits the
-          // segment when the confirmed candidate ends before it does, so a
-          // prediction that happens to be narrower than the input cuts the
-          // composition in two and the commit comes out as the confirmed head
-          // plus the prediction for the tail -- the same sentence, twice.
+        if (segment_end_ > segment_start_) {
           ai = New<SimpleCandidate>(kAICandidateType, segment_start_,
-                                    segment_end_, ai_text_,
-                                    /*comment=*/string());
+                                    segment_end_, ai_text_, string());
         }
         if (ai) {
           reordered_.push_back(ai);
           ai_inserted_index_ = 0;
         }
       }
-      return;
-    }
-
-    if (ai_text_.empty()) {
-      // No AI suggestion in flight; pass everything through unchanged.
-      reordered_ = std::move(buf);
       return;
     }
 
@@ -254,6 +247,7 @@ PredictFilter::PredictFilter(const Ticket& ticket)
     return;
   }
   Config* cfg = engine_->schema()->config();
+  ctx_opt_ = ContextBuilder::ReadOptions(cfg);
   int n = 0;
   if (cfg->GetInt("ai_predict/target_index", &n) && n >= 0) {
     target_index_ = static_cast<size_t>(n);
@@ -279,16 +273,28 @@ an<Translation> PredictFilter::Apply(an<Translation> translation,
   if (!engine_ || !engine_->context() || !translation) {
     return translation;
   }
-  string ai_text = engine_->context()->get_property(kAITextProperty);
-  // In AI-only mode an empty prediction is not "nothing to say" -- it means the
-  // menu is empty, so the upstream must not leak through. Only the ordinary
-  // mode passes the untouched candidate list along.
-  if (ai_text.empty() && !ai_only_) {
-    // No AI in flight this Compose; clear any stale highlight from the
-    // previous frame so the frontend doesn't keep colouring a row that no
-    // longer carries AI semantics.
+  if (!enabled_) {
     PublishCommentHighlight(engine_, -1);
     return translation;
+  }
+  string ai_text = engine_->context()->get_property(kAITextProperty);
+  if (!ai_text.empty()) {
+    InitTraceScope trace_scope;
+    TraceInitStage("filter_scope", "begin", "", "other");
+    try {
+      const auto published = engine_->context()->get_property(protocol::kPredictionScope);
+      const auto built = published.empty() ? std::nullopt :
+          ContextBuilder::Build(engine_, ContextBuilder::CurrentInput(engine_), ctx_opt_);
+      const auto scope = built ? ContextBuilder::PredictionScope(engine_, *built) : string();
+      if (scope.empty() || published != scope) ai_text.clear();
+    } catch (const std::exception& error) {
+      TraceInitException(error, "", "other");
+      ai_text.clear();
+    } catch (...) {
+      TraceInitFailure("filter_scope", "unknown_exception", "none", 0, 0,
+                       "unknown exception", "", "other");
+      ai_text.clear();
+    }
   }
   // The active segment's extent, for AI-only mode to span its row across.
   size_t segment_start = 0;

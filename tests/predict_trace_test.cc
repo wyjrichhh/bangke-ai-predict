@@ -15,6 +15,7 @@
 #include <glog/logging.h>
 
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -44,7 +45,12 @@ class Capture : public google::LogSink {
   bool overwrite_error = false;
   struct Entry { google::LogSeverity severity; std::string message; };
   void send(google::LogSeverity severity, const char*, const char*, int,
-            const google::LogMessageTime&, const char* message, size_t bytes) override {
+#ifdef AI_TEST_GLOG_HAS_LOG_MESSAGE_TIME
+            const google::LogMessageTime&,
+#else
+            const std::tm*,
+#endif
+            const char* message, size_t bytes) override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (overwrite_error) {
       errno = EIO;

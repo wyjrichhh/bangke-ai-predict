@@ -1,4 +1,4 @@
-// Async prediction with debounce + cache; notifies Rime context on completion.
+// Async prediction with debounce and versioned cache, collected by the caller thread.
 //
 // Copyright RIME Developers
 // Distributed under the BSD License
@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,20 +43,22 @@ class PredictionEngine {
 
   InferenceBackend* backend() { return backend_.get(); }
 
-  /// Enqueue CT2 inference; returns immediately. On completion, notifies context.
+  /// Coalesce inference requests; the worker only publishes a cache result.
   void Schedule(const PredictionContext& ctx);
 
   /// Last completed raw model output keyed by `PredictionContext::cache_key`
   /// (which combines window_text and effective_prompt to avoid
-  /// cross-context pollution).
+  /// cross-context pollution). An empty string is a completed failure; nullopt
+  /// means no completed result for this key.
   std::optional<std::string> GetCachedResult(const std::string& cache_key) const;
 
+  /// Invalidate completed results and cancel pending/in-flight publication.
   void ClearCache();
 
  private:
+  friend struct PredictInitTest;
   void WorkerLoop();
 
-  Engine* engine_;
   // 共享后端（进程级单例）：会话销毁只减引用，绝不触发 CT2 线程池拆除
   std::shared_ptr<InferenceBackend> backend_;
   PredictionEngineOptions opt_;
@@ -67,11 +70,8 @@ class PredictionEngine {
 
   std::string pending_ct2_input_;
   std::string pending_cache_key_;
-  // Pure pinyin (effective_prompt) of the in-flight request. Kept separately
-  // from cache_key so that the post-inference "did the composition still
-  // match?" check compares against ctx->input() (which is also pure pinyin),
-  // not against the cache_key (which carries the window_text prefix).
-  std::string pending_prompt_;
+  // Changes on replacement or cancellation, including A -> B -> A.
+  uint64_t request_generation_ = 0;
 
   mutable std::mutex result_mutex_;
   std::string last_cache_key_;
