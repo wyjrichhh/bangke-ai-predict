@@ -267,7 +267,8 @@ static int RunTests(const fs::path& model_source) {
     Require(capture.LastError().find(temp.path.u8string()) == std::string::npos,
             "backend exception redacts the configured path");
     try {
-      (void)nlohmann::json::parse("{");
+      const auto invalid = nlohmann::json::parse("{");
+      (void)invalid;
     } catch (const nlohmann::json::exception& error) {
       TraceInitStage("json_probe", "begin", "", "cpu");
       TraceInitException(error, "", "cpu");

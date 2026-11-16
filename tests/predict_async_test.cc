@@ -127,8 +127,8 @@ struct PipelineFixture {
     config->SetString("speller/alphabet",
                       "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
     config->SetString("ai_predict/model_path", "synthetic-model");
-    config->SetBool("ai_predict/enabled", enabled);
-    config->SetBool("ai_predict/ai_only", ai_only);
+    config->SetString("ai_predict/enabled", enabled ? "true" : "false");
+    config->SetString("ai_predict/ai_only", ai_only ? "true" : "false");
     config->SetInt("ai_predict/min_input_length", 12);
     config->SetInt("ai_predict/min_context_prompt_length", 2);
     engine->ApplySchema(new Schema("async-test", config));
@@ -376,7 +376,7 @@ int main(int argc, char** argv) {
          f.translator.reset();
          f.engine->context()->set_property(
              protocol::kClientContext,
-             std::string("private_context_sentinel") + char(0xff));
+             std::string("private_context_sentinel") + "\xff");
          Require(f.Candidates() == std::vector<std::string>{"普通候选"},
                  "malformed context blocked dictionary fallback");
        });
