@@ -22,8 +22,8 @@ namespace predict {
 struct PredictionContext {
   /// Pinyin being composed (spaces stripped), also used for display eligibility.
   string effective_prompt;
-  /// Recent commit history: everything that reached the screen, Hanzi plus the
-  /// digits/Latin/punctuation typed around it. Empty when there is no history.
+  /// Text before the active input, including explicitly selected words still
+  /// inside the composition and recent committed document text.
   string window_text;
   /// Result cache key. Combines window_text + effective_prompt so the same
   /// pinyin under different contexts can't collide.
@@ -71,6 +71,7 @@ struct ContextBuilderOptions {
 class ContextBuilder {
  public:
   static ContextBuilderOptions ReadOptions(Config* config);
+  /// All remaining pinyin before the caret, excluding explicitly selected words.
   static string CurrentInput(Engine* engine);
   static string InputSignature(Engine* engine, const ContextBuilderOptions& opt);
   static string PredictionScope(Engine* engine, const PredictionContext& prediction);

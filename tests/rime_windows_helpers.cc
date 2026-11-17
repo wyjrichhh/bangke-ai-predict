@@ -2,6 +2,7 @@
 // Keep exported Translation methods in the DLL; do not compile translation.cc.
 #include <rime/candidate.h>
 #include <rime/config.h>
+#include <rime/menu.h>
 #include <rime/schema.h>
 #include <rime/segmentation.h>
 #include <rime/ticket.h>
@@ -9,6 +10,15 @@
 #include <rime/gear/filter_commons.h>
 
 namespace rime {
+
+an<Candidate> Menu::GetCandidateAt(size_t index) {
+  if (index >= candidates_.size() && index >= Prepare(index + 1)) return nullptr;
+  return candidates_[index];
+}
+
+an<Candidate> Segment::GetSelectedCandidate() const {
+  return menu ? menu->GetCandidateAt(selected_index) : nullptr;
+}
 
 bool UniqueTranslation::Next() {
   if (exhausted()) return false;

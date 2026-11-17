@@ -3,6 +3,7 @@
 #include <rime/config.h>
 #include <rime/context.h>
 #include <rime/engine.h>
+#include <rime/menu.h>
 #include <rime/schema.h>
 #include <rime/translation.h>
 #include <rime_api.h>
@@ -96,6 +97,7 @@ struct PredictInitTest {
                    const std::shared_ptr<InferenceBackend>& backend,
                    const PredictionContext& context,
                    const std::string& result) {
+    translator.ObserveContext();
     translator.engine_path_ = translator.ResolveModelPath().u8string();
     translator.init_attempted_ = translator.init_ok_ = true;
     translator.prediction_ = std::make_unique<PredictionEngine>(
@@ -152,11 +154,28 @@ struct PipelineFixture {
     context->composition().push_back(
         Segment(0, static_cast<int>(input.size())));
   }
+  void SelectPrefix(const std::vector<std::pair<std::string, size_t>>& words) {
+    auto& composition = engine->context()->composition();
+    composition.clear();
+    size_t start = 0;
+    for (const auto& word : words) {
+      Segment segment(static_cast<int>(start), static_cast<int>(word.second));
+      segment.status = Segment::kSelected;
+      segment.menu = New<Menu>();
+      segment.menu->AddTranslation(New<UniqueTranslation>(New<SimpleCandidate>(
+          "phrase", start, word.second, word.first)));
+      segment.menu->Prepare(1);
+      composition.push_back(segment);
+      start = word.second;
+    }
+    composition.push_back(Segment(static_cast<int>(start),
+                                 static_cast<int>(engine->context()->caret_pos())));
+  }
   an<Translation> Publish(const std::string& result, bool ai_only = false) {
     ContextBuilderOptions options;
     options.ai_only = ai_only;
     const auto built = ContextBuilder::Build(
-        engine.get(), engine->context()->input(), options);
+        engine.get(), ContextBuilder::CurrentInput(engine.get()), options);
     Require(built.has_value(), "current test request must be eligible");
     PredictInitTest::Seed(*translator, backend, *built, result);
     return translator->Query(engine->context()->input(),
@@ -397,6 +416,82 @@ int main(int argc, char** argv) {
     Require(f.engine->context()->get_property("ai_predict/pending").empty(),
             "ASCII mode scheduled inference");
   });
+  test("partial selection uses chosen text and only remaining pinyin", [] {
+    PipelineFixture f;
+    f.SetInput("womenyijingkaishianzhuangle");
+    f.SelectPrefix({{"我们", 5}});
+    const auto remaining = ContextBuilder::CurrentInput(f.engine.get());
+    Require(remaining == "yijingkaishianzhuangle", "selected pinyin was repeated");
+    const auto built = ContextBuilder::Build(f.engine.get(), remaining, {});
+    Require(built && built->window_text == "这是供测试使用的正文上下文我们",
+            "chosen text was not appended to document context");
+    Require(built->ct2_input == "这是供测试使用的正文上下文我们<pinyin_start>yijingkaishianzhuangle</pinyin_start>",
+            "partial-selection backend prompt is incorrect");
+    Require(f.Publish("已经开始安装了") != nullptr, "remaining prediction missing");
+    Require(Contains(f.Candidates(), "已经开始安装了"), "remaining row was filtered");
+  });
+  test("multiple short selections trigger inference without committed history", [] {
+    PipelineFixture f;
+    f.SetInput("womenyijingkaishianzhuangle");
+    f.engine->context()->set_property(protocol::kClientContext, "");
+    f.SelectPrefix({{"我们", 5}, {"已经", 11}, {"开始", 17}});
+    const auto remaining = ContextBuilder::CurrentInput(f.engine.get());
+    Require(remaining == "anzhuangle", "multiple selections retained consumed input");
+    const auto built = ContextBuilder::Build(f.engine.get(), remaining, {});
+    Require(built && built->window_text == "我们已经开始",
+            "selected prefix did not provide short-input context");
+    Require(built->effective_prompt == "anzhuangle", "wrong remaining syllables");
+  });
+  test("changing a chosen homophone invalidates old AI text", [] {
+    PipelineFixture f;
+    f.SetInput("womenyijingkaishianzhuangle");
+    f.SelectPrefix({{"我们", 5}});
+    Require(f.Publish("已经开始安装了") != nullptr, "initial suffix missing");
+    f.SelectPrefix({{"沃门", 5}});
+    Require(!Contains(f.Candidates(), "已经开始安装了"),
+            "AI row survived a same-range chosen-text change");
+    f.translator->Query("yijingkaishianzhuangle", f.engine->context()->composition().back());
+    Require(f.backend->WaitForCall(1) == "这是供测试使用的正文上下文沃门<pinyin_start>yijingkaishianzhuangle</pinyin_start>",
+            "new request did not use the user's selected homophone");
+  });
+  test("unselected segmentation retains the full pinyin prompt", [] {
+    PipelineFixture f;
+    f.SetInput("womenyijingkaishianzhuangle");
+    f.SelectPrefix({{"我们", 5}});
+    f.engine->context()->composition().front().status = Segment::kGuess;
+    Require(ContextBuilder::CurrentInput(f.engine.get()) == f.engine->context()->input(),
+            "unselected dictionary segmentation truncated the prompt");
+  });
+  test("reopening selection restores the full input and rejects suffix cache", [] {
+    PipelineFixture f;
+    f.SetInput("womenyijingkaishianzhuangle");
+    f.SelectPrefix({{"我们", 5}});
+    f.Publish("已经开始安装了");
+    f.SetInput("womenyijingkaishianzhuangle");
+    Require(!Contains(f.Candidates(), "已经开始安装了"), "reopened composition reused suffix");
+    Require(ContextBuilder::CurrentInput(f.engine.get()) == "womenyijingkaishianzhuangle",
+            "reopened input lost selected pinyin");
+  });
+  test("late full-input inference cannot replace repeated partial selections", [] {
+    PipelineFixture f;
+    f.Publish("");
+    f.SetInput("womenyijingkaishianzhuangle");
+    f.translator->Query(f.engine->context()->input(), f.engine->context()->composition().back());
+    Require(f.backend->WaitForCall(1).find("<pinyin_start>women") != std::string::npos,
+            "initial whole-input request missing");
+    f.SelectPrefix({{"我们", 5}});
+    f.translator->Query("yijingkaishianzhuangle", f.engine->context()->composition().back());
+    f.backend->Release(0, "我们已经开始安装了");
+    Require(f.backend->WaitForCall(2) == "这是供测试使用的正文上下文我们<pinyin_start>yijingkaishianzhuangle</pinyin_start>",
+            "first partial selection did not schedule a suffix request");
+    Require(!Contains(f.Candidates(), "我们已经开始安装了"), "late whole-input row leaked");
+    f.SelectPrefix({{"我们", 5}, {"已经", 11}});
+    f.translator->Query("kaishianzhuangle", f.engine->context()->composition().back());
+    f.backend->Release(1, "已经开始安装了");
+    Require(f.backend->WaitForCall(3) == "这是供测试使用的正文上下文我们已经<pinyin_start>kaishianzhuangle</pinyin_start>",
+            "second partial selection did not update the context");
+    Require(!Contains(f.Candidates(), "已经开始安装了"), "late first suffix leaked");
+  });
   if (argc == 2)
     test("real model through registered Rime CAPI lifecycle", [&] {
       std::string model = std::filesystem::u8path(argv[1]).generic_u8string();
@@ -408,7 +503,8 @@ int main(int argc, char** argv) {
           << "---\nname: async_api\nversion: '1'\nsort: "
              "by_weight\nuse_preset_vocabulary: false\n...\n"
              "股\tgu\t100\n姑\tgu\t90\n股票\tgu piao\t100\nA股\tA gu\t100\n"
-             "我\two\t100\n我想\two xiang\t100\n我知道了\two zhi dao le\t100\n"
+             "我\two\t100\n我们\two men\t100\n已经\tyi jing\t100\n开始\tkai shi\t100\n安装了\tan zhuang le\t100\n"
+             "我想\two xiang\t100\n我知道了\two zhi dao le\t100\n"
              "我想知道现在输入法是不是正常\two xiang zhi dao xian zai shu ru "
              "fa shi bu shi zheng chang\t100\n";
       dictionary.close();
@@ -501,6 +597,32 @@ int main(int argc, char** argv) {
       api->set_caret_pos(session, 2);
       Require(property("ai_predict/text").empty(),
               "real caret move removes the prior long row");
+      api->clear_composition(session);
+      api->set_property(session, protocol::kClientContext, "测试正文");
+      api->simulate_key_sequence(session, "womenyijingkaishianzhuangle");
+      pump();
+      const auto select_word = [&](const char* text) {
+        RimeCandidateListIterator it{};
+        size_t index = 0;
+        bool found = false;
+        if (api->candidate_list_begin(session, &it)) {
+          while (api->candidate_list_next(&it)) {
+            if (std::string(it.candidate.text) == text) { found = true; break; }
+            ++index;
+          }
+          api->candidate_list_end(&it);
+        }
+        Require(found && api->select_candidate(session, index), "select actual partial dictionary candidate");
+        pump();
+      };
+      select_word("我们");
+      Require(std::string(api->get_input(session)) == "womenyijingkaishianzhuangle",
+              "Rime must retain selected pinyin inside its composition");
+      Require(property(protocol::kPredictionScope).find("测试正文我们|yijingkaishianzhuangle") != std::string::npos,
+              "real partial-selection scope did not bind chosen prefix and suffix");
+      select_word("已经");
+      Require(property(protocol::kPredictionScope).find("测试正文我们已经|kaishianzhuangle") != std::string::npos,
+              "real repeated short selection did not refresh prediction scope");
     });
 
   api->finalize();

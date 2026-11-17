@@ -77,6 +77,13 @@ result from being published, but does not interrupt an already-running CT2 call.
 Ordinary mode rejects a prediction with more Hanzi than pinyin letters, instead
 of truncating an unrelated paragraph; AI-only mode retains free generation.
 
+Explicitly selected composition words become context; their consumed pinyin is
+excluded from the next prediction. Tests cover repeated short selections,
+same-range homophone changes, reopening a selection, and late completions from
+the previous whole input or suffix. Automatic, unselected segmentation keeps the
+complete remaining prompt. The real-model C API fixture also selects two actual
+dictionary words and verifies the resulting prediction scopes.
+
 When `BANGKE_AI_TEST_MODEL_DIR` is supplied, `predict_async_model` also loads the
 actual model through the registered plugin and Rime C API, deploys a small real
 Chinese dictionary, pumps the same `soft_cursor` refresh used by the frontends,

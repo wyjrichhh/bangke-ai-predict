@@ -309,13 +309,9 @@ an<Translation> PredictTranslator::Query(const string& input,
     }
 
     TraceInitStage("query", "continue", model_path_raw_, device_);
-    // 推理要的是**用户打出来的完整输入**，不是当前这一段。
-    //
-    // composition 会被分段切开：前几个音节能翻成词、后面那段翻不出来（打错了、多了字母）
-    // 时，段会变成 [29,99) 这样——参数 input 只是那一段的尾巴，模型拿不到前半句，
-    // 于是只能给出半截答案（日志实测：input='ufashihen...' → 'ufa是很好用的…'）。
-    // 已上屏的中文不在 input 里（它走 commit_history 进 window），所以这里取全串不会
-    // 重复。段的 start/end 仍然只用于候选跨度，不受影响。
+    // Preserve all unselected input across automatic segmentation. Explicitly
+    // selected words become context instead: their pinyin must not be decoded
+    // a second time when predicting the remaining composition.
     const string prompt_input = engine_ && engine_->context()
         ? ContextBuilder::CurrentInput(engine_) : input;
     auto built = ContextBuilder::Build(engine_, prompt_input, ctx_opt_);

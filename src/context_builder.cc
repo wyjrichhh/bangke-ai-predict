@@ -10,6 +10,7 @@
 #include <utf8.h>
 
 #include <rime/commit_history.h>
+#include <rime/candidate.h>
 #include <rime/context.h>
 #include <rime/config.h>
 #include <rime/schema.h>
@@ -180,10 +181,32 @@ ContextBuilderOptions ContextBuilder::ReadOptions(Config* config) {
   return opt;
 }
 
+namespace {
+struct SelectedPrefix {
+  size_t end = 0;
+  string text;
+};
+
+SelectedPrefix GetSelectedPrefix(Context* context) {
+  SelectedPrefix prefix;
+  for (const auto& segment : context->composition()) {
+    if (segment.status < Segment::kSelected || segment.start != prefix.end ||
+        segment.end <= segment.start || segment.end > context->caret_pos())
+      break;
+    auto candidate = segment.GetSelectedCandidate();
+    if (!candidate) break;
+    prefix.text += candidate->text();
+    prefix.end = segment.end;
+  }
+  return prefix;
+}
+}  // namespace
+
 string ContextBuilder::CurrentInput(Engine* engine) {
   if (!engine || !engine->context()) return {};
   auto* context = engine->context();
-  return context->input().substr(0, context->caret_pos());
+  const auto start = GetSelectedPrefix(context).end;
+  return context->input().substr(start, context->caret_pos() - start);
 }
 
 namespace {
@@ -272,6 +295,15 @@ std::optional<PredictionContext> ContextBuilder::Build(
                          &history_window_text);
     } else {
       BuildWindowContext(context, opt.context_window_size, &window_text);
+    }
+    // Selected words are still inside the marked composition, so neither the
+    // host's text before that mark nor commit_history contains them yet.
+    const auto prefix = GetSelectedPrefix(context).text;
+    if (!prefix.empty()) {
+      window_text = TailCodepoints(window_text + prefix, opt.context_window_chars);
+      if (from_frontend)
+        history_window_text = TailCodepoints(history_window_text + prefix,
+                                             opt.context_window_chars);
     }
   }
 
