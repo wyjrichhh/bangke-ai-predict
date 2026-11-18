@@ -356,6 +356,14 @@ static int RunTests(const fs::path& model_source) {
       }
       Require(real.Initialize(config), "real CPU model still initializes");
       Require(real.Predict("nihao", 8).value_or("").size() > 0, "normal model prediction is unchanged");
+      unsigned cancellation_checks = 0;
+      const auto canceled = real.PredictCancellable(
+          "<pinyin_start>woxiangzhidaoxianzaishurufashibushizhengchang</pinyin_start>",
+          64, [&] { return ++cancellation_checks >= 4; });
+      Require(cancellation_checks >= 4 && !canceled,
+              "real CT2 token callback did not cancel the partial decode");
+      Require(real.Predict("nihao", 8).value_or("").size() > 0,
+              "cancellation damaged subsequent model prediction");
       real.Shutdown();
       Require(!capture.Contains(google::GLOG_INFO, "phase=end"),
               "successful initialization does not emit per-stage INFO");

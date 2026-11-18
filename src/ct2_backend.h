@@ -64,6 +64,9 @@ class CT2Backend : public InferenceBackend {
 
   std::optional<std::string> Predict(const std::string& prompt,
                                      std::optional<int> max_tokens) override;
+  std::optional<std::string> PredictCancellable(
+      const std::string& prompt, std::optional<int> max_tokens,
+      const CancellationCheck& canceled) override;
 
   /// 诊断用：只编码、不出结果，供离线工具把 token 序列与参考实现逐条比对。
   /// 只看最终输出会漏掉「分词错了但碰巧拼对」的情况。

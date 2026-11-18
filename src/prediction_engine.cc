@@ -108,8 +108,14 @@ void PredictionEngine::WorkerLoop() {
       continue;
     }
 
+    const auto canceled = [this, generation] {
+      std::lock_guard<std::mutex> lock(worker_mutex_);
+      return shutdown_ || generation != request_generation_;
+    };
+    if (canceled()) continue;
     auto t0 = std::chrono::steady_clock::now();
-    auto result = backend_->Predict(ct2_input, opt_.max_tokens);
+    auto result = backend_->PredictCancellable(ct2_input, opt_.max_tokens, canceled);
+    if (canceled()) continue;
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0)
                      .count();

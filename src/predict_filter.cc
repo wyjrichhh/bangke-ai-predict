@@ -277,6 +277,12 @@ an<Translation> PredictFilter::Apply(an<Translation> translation,
     PublishCommentHighlight(engine_, -1);
     return translation;
   }
+  if (engine_->context()->get_option("ascii_mode")) {
+    PublishCommentHighlight(engine_, -1);
+    // Retire late AI rows while retaining ordinary/raw English editing.
+    return New<AIPredictFilteredTranslation>(std::move(translation), string(),
+        target_index_, search_range_, false, 0, 0);
+  }
   string ai_text = engine_->context()->get_property(kAITextProperty);
   if (!ai_text.empty()) {
     InitTraceScope trace_scope;

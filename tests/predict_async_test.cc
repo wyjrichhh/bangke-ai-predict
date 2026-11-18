@@ -4,6 +4,7 @@
 #include <rime/context.h>
 #include <rime/engine.h>
 #include <rime/menu.h>
+#include <rime/key_event.h>
 #include <rime/schema.h>
 #include <rime/translation.h>
 #include <rime_api.h>
@@ -75,6 +76,42 @@ class ControlledBackend : public InferenceBackend {
   std::condition_variable cv_;
   std::deque<Call> calls_;
   bool release_all_ = false;
+};
+
+class CancellableBackend : public InferenceBackend {
+ public:
+  std::atomic<unsigned> started{0}, stopped{0};
+  std::atomic<bool> finish{false};
+  bool Initialize(const InferenceBackendConfig&) override { return true; }
+  void Shutdown() override { finish = true; }
+  bool IsInitialized() const override { return true; }
+  std::optional<std::string> Predict(const std::string&, std::optional<int>) override {
+    ++started;
+    while (!finish) std::this_thread::sleep_for(1ms);
+    return "结果";
+  }
+  std::optional<std::string> PredictCancellable(const std::string&, std::optional<int>,
+                                               const CancellationCheck& canceled) override {
+    ++started;
+    while (!finish) {
+      if (canceled()) { ++stopped; return std::nullopt; }
+      std::this_thread::sleep_for(1ms);
+    }
+    return "结果";
+  }
+  static void Wait(const std::function<bool()>& ready) {
+    const auto end = std::chrono::steady_clock::now() + 3s;
+    while (!ready()) {
+      Require(std::chrono::steady_clock::now() < end, "cancellable worker did not settle");
+      std::this_thread::sleep_for(1ms);
+    }
+  }
+};
+
+struct CancellationFixture {
+  std::shared_ptr<CancellableBackend> backend = std::make_shared<CancellableBackend>();
+  PredictionEngine worker{nullptr, backend, PredictionEngineOptions{0, {}}};
+  ~CancellationFixture() { backend->finish = true; }
 };
 
 struct WorkerFixture {
@@ -239,6 +276,27 @@ int main(int argc, char** argv) {
       std::cout << "FAIL " << name << ": " << error.what() << '\n';
     }
   };
+  test("pause stops an in-flight decoder instead of waiting for completion", [] {
+    CancellationFixture f;
+    f.worker.Schedule(WorkerFixture::Request("A"));
+    CancellableBackend::Wait([&] { return f.backend->started == 1; });
+    f.worker.ClearCache();
+    CancellableBackend::Wait([&] { return f.backend->stopped == 1; });
+    Require(!f.backend->finish && !f.worker.GetCachedResult("A"),
+            "pause completed or published the canceled inference");
+  });
+  test("resume starts one replacement after canceling the paused request", [] {
+    CancellationFixture f;
+    f.worker.Schedule(WorkerFixture::Request("A"));
+    CancellableBackend::Wait([&] { return f.backend->started == 1; });
+    f.worker.ClearCache();
+    f.worker.Schedule(WorkerFixture::Request("B"));
+    CancellableBackend::Wait([&] { return f.backend->started == 2; });
+    Require(f.backend->stopped == 1, "replacement ran before canceling the old decoder");
+    f.backend->finish = true;
+    CancellableBackend::Wait([&] { return f.worker.GetCachedResult("B").has_value(); });
+    Require(!f.worker.GetCachedResult("A"), "canceled prediction was resurrected");
+  });
   test("superseded worker result is discarded", [] {
     WorkerFixture f;
     f.worker.Schedule(WorkerFixture::Request("A"));
@@ -416,6 +474,36 @@ int main(int argc, char** argv) {
     Require(f.engine->context()->get_property("ai_predict/pending").empty(),
             "ASCII mode scheduled inference");
   });
+  test("paused AI-only mode keeps raw candidates and removes orphan AI rows", [] {
+    PipelineFixture f(true);
+    f.Publish("股票", true);
+    f.engine->context()->set_option("ascii_mode", true);
+    Require(f.Candidates(true) == std::vector<std::string>{"普通候选"},
+            "paused mode lost raw input or retained an old AI row");
+  });
+  test("repeated pause and resume preserve a single pinyin request", [] {
+    PipelineFixture f;
+    const std::string input = "womenyijingkaishianzhuangle";
+    f.SetInput(input);
+    f.Publish("我们已经开始安装了");
+    for (size_t cycle = 0; cycle < 3; ++cycle) {
+      auto* ctx = f.engine->context();
+      ctx->set_option("ascii_mode", true);
+      Require(ctx->get_property("ai_predict/pending").empty() &&
+                  ctx->get_property("ai_predict/text").empty(),
+              "pause retained pending work or a published prediction");
+      Require(!f.translator->Query(input, ctx->composition().back()),
+              "pause scheduled a new translation");
+      ctx->set_option("ascii_mode", false);
+      f.translator->Query(input, ctx->composition().back());
+      Require(ctx->input() == input, "resume duplicated the raw pinyin");
+      Require(f.backend->WaitForCall(cycle + 1) ==
+                  "这是供测试使用的正文上下文<pinyin_start>" + input + "</pinyin_start>",
+              "resume repeated pinyin inside its prediction prompt");
+      ctx->set_option("ascii_mode", true);
+      f.backend->Release(cycle, "过期结果");
+    }
+  });
   test("partial selection uses chosen text and only remaining pinyin", [] {
     PipelineFixture f;
     f.SetInput("womenyijingkaishianzhuangle");
@@ -511,8 +599,8 @@ int main(int argc, char** argv) {
       std::ofstream schema(isolated / "async_api.schema.yaml");
       schema << "schema:\n  schema_id: async_api\n  name: async_api\n  "
                 "version: '1'\n"
-                "engine:\n  processors: [speller, selector, express_editor]\n"
-                "  segmentors: [abc_segmentor]\n"
+                "engine:\n  processors: [ascii_composer, speller, selector, express_editor]\n"
+                "  segmentors: [ascii_segmentor, abc_segmentor]\n"
                 "  translators: [ai_predict_translator, script_translator]\n"
                 "  filters: [uniquifier, ai_predict_filter]\n"
                 "speller:\n  alphabet: "
@@ -520,6 +608,7 @@ int main(int argc, char** argv) {
                 "  delimiter: \" '\"\n"
                 "translator:\n  dictionary: async_api\n  enable_user_dict: "
                 "false\n  enable_completion: false\n"
+                "ascii_composer:\n  switch_key:\n    Shift_R: inline_ascii\n"
                 "menu:\n  page_size: 5\n"
                 "ai_predict:\n  model_path: '"
              << model
@@ -567,6 +656,24 @@ int main(int argc, char** argv) {
               "real long pinyin obtains a model prediction");
       Require(!property(protocol::kPredictionScope).empty(),
               "production translator publishes a bound scope");
+      std::string preserved = api->get_input(session);
+      for (int cycle = 0; cycle < 3; ++cycle) {
+        api->process_key(session, 0xffe2, 0);  // XK_Shift_R.
+        api->process_key(session, 0xffe2, kReleaseMask);
+        Require(api->get_option(session, "ascii_mode"), "right Shift did not pause conversion");
+        Require(property("ai_predict/pending").empty() && property("ai_predict/text").empty(),
+                "real pause left AI work or text active");
+        api->simulate_key_sequence(session, "test");
+        preserved += "test";
+        Require(std::string(api->get_input(session)) == preserved,
+                "paused English editing duplicated or committed the pinyin");
+        api->process_key(session, 0xffe2, 0);
+        api->process_key(session, 0xffe2, kReleaseMask);
+        Require(!api->get_option(session, "ascii_mode"), "right Shift did not resume conversion");
+        Require(std::string(api->get_input(session)) == preserved,
+                "real resume duplicated the preserved pinyin");
+        pump();
+      }
       api->clear_composition(session);
       Require(property("ai_predict/text").empty() &&
                   property("ai_predict/pending").empty(),

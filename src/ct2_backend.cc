@@ -345,6 +345,13 @@ void CT2Backend::Shutdown() {
 
 std::optional<std::string> CT2Backend::Predict(
     const std::string& prompt, std::optional<int> max_tokens) {
+  return PredictCancellable(prompt, max_tokens, {});
+}
+
+std::optional<std::string> CT2Backend::PredictCancellable(
+    const std::string& prompt, std::optional<int> max_tokens,
+    const CancellationCheck& canceled) {
+  if (canceled && canceled()) return std::nullopt;
   if (!initialized_.load(std::memory_order_acquire)) {
     LOG(ERROR) << "CT2Backend::Predict: service not initialized";
     return std::nullopt;
@@ -384,8 +391,18 @@ std::optional<std::string> CT2Backend::Predict(
       options.end_token = end_tokens;
     }
 
+    // CTranslate2 exposes token callbacks for greedy decoding. Preserve custom
+    // beam-search settings; those requests are still invalidated on return.
+    if (canceled && options.beam_size == 1) {
+      options.callback = [canceled](ctranslate2::GenerationStepResult) {
+        return canceled();
+      };
+    }
+    if (canceled && canceled()) return std::nullopt;
     std::vector<std::vector<std::string>> batch = {source_tokens};
     auto results = translator_->translate_batch(batch, options);
+    // A stopped decode may return a partial hypothesis; never publish it.
+    if (canceled && canceled()) return std::nullopt;
 
     // 超时判定放在推理「之后」：放在之前只能量到分词（微秒级），永远不触发，
     // 真正需要保护的长时间推理反而完全没被覆盖。这里丢弃的是已经跑完的结果，

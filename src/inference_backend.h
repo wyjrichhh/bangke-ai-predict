@@ -6,6 +6,7 @@
 #ifndef RIME_PREDICT_INFERENCE_BACKEND_H_
 #define RIME_PREDICT_INFERENCE_BACKEND_H_
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -35,6 +36,7 @@ struct InferenceBackendConfig {
 
 class InferenceBackend {
  public:
+  using CancellationCheck = std::function<bool()>;
   virtual ~InferenceBackend() = default;
 
   virtual bool Initialize(const InferenceBackendConfig& config) = 0;
@@ -45,6 +47,16 @@ class InferenceBackend {
   /// `max_tokens` 为 nullopt 表示调用方没有配置，用后端自己解析出的上限。
   virtual std::optional<std::string> Predict(
       const std::string& prompt, std::optional<int> max_tokens) = 0;
+
+  // Backends can stop decoding cooperatively without canceling other sessions.
+  virtual std::optional<std::string> PredictCancellable(
+      const std::string& prompt, std::optional<int> max_tokens,
+      const CancellationCheck& canceled) {
+    if (canceled && canceled()) return std::nullopt;
+    auto result = Predict(prompt, max_tokens);
+    if (canceled && canceled()) return std::nullopt;
+    return result;
+  }
 };
 
 }  // namespace predict
