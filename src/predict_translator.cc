@@ -120,7 +120,7 @@ PredictTranslator::PredictTranslator(const Ticket& ticket) : Translator(ticket) 
         });
     option_connection_ = context->option_update_notifier().connect(
         [this](Context*, const string& name) {
-          if (name == "ascii_mode") ObserveContext();
+          if (name == "ascii_mode" || name == "ai_predict_paused") ObserveContext();
         });
   }
 }
@@ -208,11 +208,11 @@ void PredictTranslator::LoadOptions() {
             << " enabled=" << enabled_;
 }
 
-std::filesystem::path PredictTranslator::ResolveModelPath() const {
+rime::fs::path PredictTranslator::ResolveModelPath() const {
   if (model_path_raw_.empty()) {
     return {};
   }
-  std::filesystem::path p = std::filesystem::u8path(model_path_raw_);
+  rime::fs::path p = rime::fs::u8path(model_path_raw_);
   if (p.is_absolute()) {
     return p;
   }
@@ -257,7 +257,7 @@ bool PredictTranslator::EnsureEngine() {
     return false;
   }
   TraceInitStage("vocabulary_exists", "begin", model_path_raw_, device_);
-  if (!std::filesystem::exists(path / "shared_vocabulary.json")) {
+  if (!rime::fs::exists(path / "shared_vocabulary.json")) {
     TraceInitStage("vocabulary_failure_log", "failed", model_path_raw_, device_);
     LOG(ERROR) << "ai_predict_translator: model directory missing shared_vocabulary.json";
     return false;
@@ -298,7 +298,7 @@ an<Translation> PredictTranslator::Query(const string& input,
     // 调度了才重新置上：EnsureEngine/Build/is_active_segment 这些提前返回都不代表有推理
     // 在途，留着上一轮的 "1" 会让前端按刷新间隔永远重排下去。
     PublishPendingProperty(engine_, false);
-    if (engine_ && engine_->context() && engine_->context()->get_option("ascii_mode")) {
+    if (engine_ && engine_->context() && (engine_->context()->get_option("ascii_mode") || engine_->context()->get_option("ai_predict_paused"))) {
       ClearFailedPrediction();
       return nullptr;
     }
@@ -387,6 +387,11 @@ void PredictTranslator::ObserveContext() noexcept {
   InitTraceScope trace_scope;
   TraceInitStage("context_update", "begin", model_path_raw_, device_);
   try {
+    if (engine_ && engine_->context() && engine_->context()->get_option("ai_predict_paused")) {
+      if (prediction_) prediction_->ClearCache();
+      ClearFailedPrediction();
+      return;
+    }
     const auto current = ContextBuilder::InputSignature(engine_, ctx_opt_);
     if (current == observed_input_signature_) return;
     observed_input_signature_ = current;

@@ -10,7 +10,7 @@
 #include <climits>
 #include <cstdint>
 #include <fstream>
-#include <filesystem>
+#include <rime/compat/filesystem.h>
 
 #include <nlohmann/json.hpp>
 
@@ -527,7 +527,11 @@ std::unique_ptr<Tokenizer> Tokenizer::Create(
     const std::string& tokenizer_json_path,
     const std::unordered_map<std::string, int>& token_to_id,
     const std::string& unk_token, std::string* reason) {
-  std::ifstream file(std::filesystem::u8path(tokenizer_json_path));
+  #ifdef RIME_LEGACY_FILESYSTEM
+  std::ifstream file(rime::fs::u8path(tokenizer_json_path).u8string());
+#else
+  std::ifstream file(rime::fs::u8path(tokenizer_json_path));
+#endif
   if (!file.is_open()) {
     *reason = "cannot open " + tokenizer_json_path;
     return nullptr;

@@ -12,7 +12,7 @@
 #include <rime/translator.h>
 #include <boost/signals2/connection.hpp>
 
-#include <filesystem>
+#include <rime/compat/filesystem.h>
 #include <memory>
 
 namespace rime {
@@ -30,7 +30,7 @@ class PredictTranslator : public Translator {
   bool EnsureEngine();
   void ClearFailedPrediction() noexcept;
   void ObserveContext() noexcept;
-  std::filesystem::path ResolveModelPath() const;
+  rime::fs::path ResolveModelPath() const;
   void LoadOptions();
 
   ContextBuilderOptions ctx_opt_;

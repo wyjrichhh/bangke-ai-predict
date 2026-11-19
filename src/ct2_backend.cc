@@ -14,7 +14,7 @@
 #include <chrono>
 #include <climits>
 #include <fstream>
-#include <filesystem>
+#include <rime/compat/filesystem.h>
 #include <optional>
 #include <thread>
 #include <condition_variable>
@@ -451,7 +451,11 @@ std::optional<std::string> CT2Backend::PredictCancellable(
 }
 
 bool CT2Backend::LoadSharedVocabulary(const std::string& path) {
-  std::ifstream file(std::filesystem::u8path(path));
+  #ifdef RIME_LEGACY_FILESYSTEM
+  std::ifstream file(rime::fs::u8path(path).u8string());
+#else
+  std::ifstream file(rime::fs::u8path(path));
+#endif
   if (!file.is_open()) {
     LOG(ERROR) << "CT2Backend: cannot open shared_vocabulary.json";
     return false;
@@ -497,7 +501,11 @@ void CT2Backend::ResolveDecodeParams(const std::string& model_path,
   // 模型包自带解码参数：训练侧调 beam 之类的约定只需重新出模型，不必我们发版。
   // 文件缺失是正常情况（旧模型），静默落到编译期默认值。
   const std::string path = model_path + "/generation_config.json";
-  std::ifstream file(std::filesystem::u8path(path));
+  #ifdef RIME_LEGACY_FILESYSTEM
+  std::ifstream file(rime::fs::u8path(path).u8string());
+#else
+  std::ifstream file(rime::fs::u8path(path));
+#endif
   if (file.is_open()) {
     try {
       nlohmann::json j;
